@@ -1,0 +1,7 @@
+{
+  "name": "GOGOMA",
+  "description": "A simplified, high-contrast emergency response system connecting citizens to police stations via a low-bandwidth MVP interface.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
