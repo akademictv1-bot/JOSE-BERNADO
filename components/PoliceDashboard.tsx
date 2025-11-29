@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { EmergencyAlert, AlertStatus, EmergencyType } from '../types';
 import { getPoliceProtocol } from '../services/geminiService';
-import { Bell, Map, Phone, Navigation, Radio, BrainCircuit, Lock, CheckCircle, FileText, LogOut, Vibrate } from 'lucide-react';
+import { atualizarStatusEmergencia, solicitarPermissaoNotificacao, onMessageListener } from '../services/firebaseService'; // Importar serviço FCM
+import { Bell, Map, Phone, Navigation, BrainCircuit, Lock, CheckCircle, FileText, LogOut, Wifi, WifiOff, Archive, AlertCircle, Clock, ArrowDownCircle, MapPin, User, Calendar, MapPinOff } from 'lucide-react';
 
 interface PoliceDashboardProps {
   alerts: EmergencyAlert[];
-  updateAlertStatus: (id: string, status: AlertStatus) => void;
+  isOnline: boolean;
 }
 
-const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, updateAlertStatus }) => {
+const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) => {
   // Auth State - Initialize from localStorage to persist login
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     return localStorage.getItem('gogoma_police_auth') === 'true';
@@ -22,38 +23,221 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, updateAlertSt
   const [aiProtocol, setAiProtocol] = useState<string | null>(null);
   const [loadingAi, setLoadingAi] = useState(false);
   
-  // Sort alerts: Newest first, putting NEW status at the top
-  const sortedAlerts = [...alerts].sort((a, b) => {
-    if (a.status === AlertStatus.NEW && b.status !== AlertStatus.NEW) return -1;
-    if (a.status !== AlertStatus.NEW && b.status === AlertStatus.NEW) return 1;
-    return b.timestamp - a.timestamp;
-  });
+  // Tabs State: 'pending' (Ativos/Não Resolvidos) or 'resolved' (Resolvidos)
+  const [activeTab, setActiveTab] = useState<'pending' | 'resolved'>('pending');
 
-  const activeAlertsCount = alerts.filter(a => a.status === AlertStatus.NEW).length;
-  
-  // Audio Ref
+  // --- PAGINAÇÃO DINÂMICA ---
+  const [visibleCount, setVisibleCount] = useState(10);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Audio & Alarm State
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const activeOscillatorRef = useRef<OscillatorNode | null>(null);
+  const alarmIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [isAlarmRinging, setIsAlarmRinging] = useState(false); // Para o alerta visual (tela piscando)
 
-  // Play alarm sound when there are NEW alerts
+  // Resetar contagem ao trocar de aba (Lógica de refresh)
   useEffect(() => {
-    if (isAuthenticated && activeAlertsCount > 0) {
-      playAlarm();
-    }
-  }, [activeAlertsCount, isAuthenticated]);
+    setVisibleCount(10);
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [activeTab]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  // Lógica de Scroll Infinito
+  const handleScroll = () => {
+    if (listRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = listRef.current;
+      if (scrollTop + clientHeight >= scrollHeight - 20) {
+        setVisibleCount(prev => prev + 10);
+      }
+    }
+  };
+
+  // Inicializar Listener de Notificações quando autenticado
+  useEffect(() => {
+    if (isAuthenticated) {
+        onMessageListener()
+            .then((payload: any) => {
+                if (payload) {
+                    console.log("Notificação recebida em foreground:", payload);
+                }
+            })
+            .catch(err => console.log('failed: ', err));
+    }
+  }, [isAuthenticated]);
+  
+  // Validação rigorosa de dados
+  const isValidAlert = (alert: EmergencyAlert) => {
+    return (
+        alert.contactNumber && 
+        alert.contactNumber.length > 5 &&
+        alert.timestamp > 1700000000000
+    );
+  };
+
+  // Processamento da Lista
+  const processedAlerts = alerts
+    .filter(isValidAlert)
+    .filter(alert => {
+        if (activeTab === 'pending') {
+            return alert.status !== AlertStatus.RESOLVED;
+        } else {
+            return alert.status === AlertStatus.RESOLVED;
+        }
+    })
+    .sort((a, b) => b.timestamp - a.timestamp);
+
+  const visibleAlerts = processedAlerts.slice(0, visibleCount);
+  const hasMore = visibleCount < processedAlerts.length;
+
+  // --- LÓGICA DE ALARME INTELIGENTE ---
+  // Condições para tocar:
+  // 1. Existe alerta com status NEW.
+  // 2. Existe alerta não resolvido há mais de 1 HORA (3600000 ms).
+  const hasCriticalAlerts = () => {
+      const now = Date.now();
+      const hasNew = alerts.some(a => a.status === AlertStatus.NEW);
+      // Regra de 1 Hora: Repetir alarme se pedido não foi atendido
+      const hasLongUnresolved = alerts.some(a => 
+          a.status !== AlertStatus.RESOLVED && (now - a.timestamp > 3600000)
+      );
+      return hasNew || hasLongUnresolved;
+  };
+
+  useEffect(() => {
+    const shouldRing = hasCriticalAlerts();
+
+    if (isAuthenticated && shouldRing) {
+        // Se já existe ciclo, não reinicia, mantém o ritmo.
+        if (!alarmIntervalRef.current) {
+            console.log("🚨 ALARME DISPARADO: Novo incidente ou Atraso > 1h");
+            
+            // Tocar primeira vez imediatamente
+            triggerSirenSequence(); 
+            
+            // Configurar ciclo: Toca 10s, espera 30s = Repete a cada 40s
+            alarmIntervalRef.current = setInterval(() => {
+                // Verificar novamente dentro do intervalo se ainda precisa tocar
+                // (Caso todos tenham sido resolvidos durante a pausa de 30s)
+                if (hasCriticalAlerts()) {
+                    triggerSirenSequence();
+                } else {
+                    stopAlarm();
+                }
+            }, 40000); 
+        }
+    } else {
+        stopAlarm();
+    }
+
+    return () => {
+        if (!isAuthenticated) stopAlarm();
+    };
+  }, [alerts, isAuthenticated]); // Dependência em 'alerts' garante reavaliação a cada update do Firebase
+
+  const stopAlarm = () => {
+    if (alarmIntervalRef.current) {
+        clearInterval(alarmIntervalRef.current);
+        alarmIntervalRef.current = null;
+    }
+    stopSirenSound();
+    setIsAlarmRinging(false);
+  };
+
+  const stopSirenSound = () => {
+    if (activeOscillatorRef.current) {
+        try {
+            activeOscillatorRef.current.stop();
+            activeOscillatorRef.current.disconnect();
+        } catch (e) { /* ignore */ }
+        activeOscillatorRef.current = null;
+    }
+  };
+
+  const triggerSirenSequence = () => {
+    setIsAlarmRinging(true); // Ativa alerta visual
+    triggerSirenSound();
+    
+    // Parar som e visual após 10 segundos
+    setTimeout(() => {
+        stopSirenSound();
+        setIsAlarmRinging(false);
+    }, 10000);
+  };
+
+  const triggerSirenSound = () => {
+    // Tocar vibração (padrão SOS longo)
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        navigator.vibrate([1000, 500, 1000, 500, 1000, 500, 2000]);
+    }
+
+    try {
+        if (!audioCtxRef.current) {
+            audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        const ctx = audioCtxRef.current;
+        if (ctx.state === 'suspended') ctx.resume();
+
+        stopSirenSound(); // Garante limpeza anterior
+
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        const now = ctx.currentTime;
+        const duration = 10; // 10 segundos exatos
+
+        // Configurar Sirene Policial (Sawtooth com Modulação)
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(600, now);
+
+        // Efeito "Wail" (Sobe e desce rápido)
+        // 10 loops de 1 segundo cada
+        for (let i = 0; i < duration; i++) {
+            osc.frequency.linearRampToValueAtTime(1500, now + i + 0.5); // Sobe
+            osc.frequency.linearRampToValueAtTime(600, now + i + 1.0);  // Desce
+        }
+
+        // Volume Envelope (Fade in/out)
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.5, now + 0.5);
+        gain.gain.setValueAtTime(0.5, now + duration - 0.5);
+        gain.gain.linearRampToValueAtTime(0, now + duration);
+
+        osc.start(now);
+        osc.stop(now + duration);
+
+        activeOscillatorRef.current = osc;
+        osc.onended = () => {
+            if (activeOscillatorRef.current === osc) {
+                activeOscillatorRef.current = null;
+            }
+        };
+
+    } catch (e) {
+        console.error("Audio error", e);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // HARDCODED CREDENTIALS as per requirement
     if (badgeId === '8866' && password === '1234') {
         setIsAuthenticated(true);
-        localStorage.setItem('gogoma_police_auth', 'true'); // Persist login
+        localStorage.setItem('gogoma_police_auth', 'true');
         setAuthError(false);
+        // Inicializar contexto de áudio no clique (interação do usuário)
+        if (!audioCtxRef.current) {
+             audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        await solicitarPermissaoNotificacao(badgeId);
     } else {
         setAuthError(true);
     }
   };
 
   const handleLogout = () => {
+    stopAlarm();
     setIsAuthenticated(false);
     localStorage.removeItem('gogoma_police_auth');
     setSelectedAlert(null);
@@ -61,51 +245,26 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, updateAlertSt
     setPassword('');
   };
 
-  const playAlarm = () => {
-    // 1. Vibration (Android/Mobile)
-    // Pattern: Vibrate 500ms, Pause 200ms, Vibrate 500ms, Pause 200ms, Vibrate 1000ms
-    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
-        navigator.vibrate([500, 200, 500, 200, 1000]);
-    }
-
-    // 2. Audio Alarm
-    // Simple oscillator alarm for browser compatibility without external files
-    try {
-        if (!audioCtxRef.current) {
-            audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        }
-        const ctx = audioCtxRef.current;
-        if(ctx.state === 'suspended') ctx.resume();
-
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(440, ctx.currentTime);
-        osc.frequency.linearRampToValueAtTime(880, ctx.currentTime + 0.1);
-        osc.frequency.linearRampToValueAtTime(440, ctx.currentTime + 0.2);
-        
-        gain.gain.setValueAtTime(0.5, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
-
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.5);
-    } catch (e) {
-        console.error("Audio play failed (interaction required)", e);
-    }
+  const updateAlertStatus = async (id: string, status: AlertStatus) => {
+      await atualizarStatusEmergencia(id, status);
+      if (status === AlertStatus.RESOLVED && activeTab === 'pending') {
+         if (selectedAlert?.id === id) setSelectedAlert(null);
+      }
   };
 
   const handleSelectAlert = (alert: EmergencyAlert) => {
     setSelectedAlert(alert);
-    setAiProtocol(null); // Reset AI advice
+    setAiProtocol(null); 
   };
 
   const handleGenerateProtocol = async () => {
-    if (!selectedAlert) return;
+    if (!selectedAlert || !isOnline) return;
     setLoadingAi(true);
-    const advice = await getPoliceProtocol(selectedAlert.type, selectedAlert.location);
+    const loc = (selectedAlert.location && selectedAlert.location.lat) 
+        ? selectedAlert.location 
+        : { lat: 0, lng: 0 }; 
+    
+    const advice = await getPoliceProtocol(selectedAlert.type, loc);
     setAiProtocol(advice);
     setLoadingAi(false);
   };
@@ -115,49 +274,60 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, updateAlertSt
     return date.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
   };
 
+  const formatFullDate = (ts: number) => {
+    return new Date(ts).toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
   const getElapsedTime = (ts: number) => {
     const diff = Date.now() - ts;
     const minutes = Math.floor(diff / 60000);
     if (minutes < 1) return 'Agora';
+    if (minutes > 60) return `${Math.floor(minutes/60)}h ${minutes%60}m atrás`;
     return `${minutes} min atrás`;
   };
 
   // --- AUTH SCREEN ---
   if (!isAuthenticated) {
     return (
-        <div className="flex flex-col h-full bg-gray-900 items-center justify-center p-6 text-white">
-            <div className="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-sm border border-gray-700">
+        <div className="flex flex-col h-full bg-slate-950 items-center justify-center p-6 text-white">
+            <div className="bg-slate-900 p-8 rounded-2xl shadow-2xl w-full max-w-sm border border-slate-800 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-600 to-purple-600"></div>
                 <div className="flex justify-center mb-6 text-blue-500">
-                    <Lock size={48} />
+                    <div className="p-4 bg-slate-800 rounded-full">
+                        <Lock size={40} />
+                    </div>
                 </div>
-                <h2 className="text-2xl font-bold text-center mb-1">Acesso Restrito</h2>
-                <p className="text-gray-400 text-center mb-6 text-sm">Portal de Resposta a Emergências</p>
+                <h2 className="text-xl font-bold text-center mb-1 tracking-wide">ACESSO RESTRITO</h2>
+                <p className="text-slate-500 text-center mb-8 text-xs uppercase tracking-widest">Portal Tático GOGOMA</p>
                 
-                <form onSubmit={handleLogin} className="space-y-4">
+                <form onSubmit={handleLogin} className="space-y-5">
                     <div>
-                        <label className="block text-xs font-bold text-gray-500 uppercase mb-1">ID Agente (Badge)</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2 tracking-wider">ID Agente</label>
                         <input 
-                            type="text" 
-                            className="w-full bg-gray-900 border border-gray-600 rounded p-3 text-white focus:border-blue-500 focus:outline-none"
+                            type="password" 
+                            className="w-full bg-slate-800 border-2 border-slate-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none transition-all placeholder:text-slate-600 font-bold text-center tracking-[0.5em]"
                             value={badgeId}
                             onChange={(e) => setBadgeId(e.target.value)}
-                            placeholder="Ex: 8866"
+                            autoComplete="off"
                         />
                     </div>
                     <div>
-                        <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Senha</label>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2 tracking-wider">Senha de Acesso</label>
                         <input 
                             type="password" 
-                            className="w-full bg-gray-900 border border-gray-600 rounded p-3 text-white focus:border-blue-500 focus:outline-none"
+                            className="w-full bg-slate-800 border-2 border-slate-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none transition-all font-bold text-center tracking-[0.5em]"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                         />
                     </div>
-                    {authError && <p className="text-red-500 text-sm font-bold bg-red-900/20 p-2 rounded text-center">Credenciais inválidas.</p>}
-                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded transition-colors">
-                        ENTRAR NO SISTEMA
+                    {authError && <p className="text-red-400 text-xs font-bold text-center animate-pulse">Acesso Negado. Verifique credenciais.</p>}
+                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-lg transition-colors uppercase text-sm tracking-widest shadow-lg mt-2">
+                        Autenticar
                     </button>
                 </form>
+            </div>
+            <div className="mt-8 text-[10px] text-slate-600 font-mono">
+                SISTEMA DE SEGURANÇA 1.0.4
             </div>
         </div>
     )
@@ -165,98 +335,227 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, updateAlertSt
 
   // --- DASHBOARD UI ---
   return (
-    <div className="flex flex-col h-full bg-gray-900 text-gray-100 font-sans">
+    <div className={`flex flex-col h-full bg-slate-900 text-gray-100 font-sans relative ${isAlarmRinging ? 'animate-pulse bg-red-950/50' : ''}`}>
+      
+      {/* Visual Alarm Overlay */}
+      {isAlarmRinging && (
+        <div className="absolute inset-0 z-0 bg-red-600/10 pointer-events-none animate-pulse"></div>
+      )}
+
       {/* Top Bar */}
-      <div className={`p-4 flex justify-between items-center ${activeAlertsCount > 0 ? 'bg-red-900 animate-pulse' : 'bg-slate-800'}`}>
+      <div className={`p-3 md:p-4 flex justify-between items-center shadow-lg z-10 ${isAlarmRinging ? 'bg-red-900 animate-pulse border-b-4 border-red-500' : 'bg-slate-800'}`}>
         <div className="flex items-center gap-3">
-            <Radio className={activeAlertsCount > 0 ? 'animate-ping' : ''} />
-            <h1 className="text-xl font-bold tracking-wider">POSTO POLICIAL #04</h1>
+            <div className={`p-2 rounded-full ${isAlarmRinging ? 'bg-white text-red-600 animate-ping' : 'bg-slate-700 text-slate-400'}`}>
+                <AlertCircle size={20} />
+            </div>
+            <div>
+                <h1 className="text-sm md:text-lg font-black tracking-widest uppercase text-white">
+                    {isAlarmRinging ? '🚨 EMERGÊNCIA ATIVA' : 'Comando #04'}
+                </h1>
+                <p className="text-[10px] text-slate-300 font-mono hidden md:block">MONITORAMENTO EM TEMPO REAL</p>
+            </div>
         </div>
         <div className="flex items-center gap-4">
-            <div className="text-right hidden md:block">
-                <div className="text-xs text-gray-400">AGENTE (8866)</div>
-                <div className="font-bold text-sm text-green-400">ONLINE</div>
+            <div className="text-right hidden sm:block">
+                <div className={`font-bold text-xs flex items-center gap-1 justify-end ${isOnline ? 'text-green-400' : 'text-red-500'}`}>
+                    {isOnline ? (
+                      <> <Wifi size={12} /> CONECTADO </>
+                    ) : (
+                      <> <WifiOff size={12} /> OFFLINE </>
+                    )}
+                </div>
             </div>
             
             <button 
                 onClick={handleLogout}
-                className="bg-gray-700 hover:bg-gray-600 p-2 rounded text-gray-300"
+                className="bg-slate-700 hover:bg-red-900 p-2 rounded text-slate-300 hover:text-white transition-colors z-20"
                 title="Sair / Bloquear"
             >
                 <LogOut size={18} />
             </button>
-
-            <div className="flex items-center gap-2 bg-gray-900 px-3 py-1 rounded border border-gray-700">
-                <Bell size={20} className={activeAlertsCount > 0 ? 'text-yellow-400' : 'text-gray-500'} />
-                <span className="font-mono text-xl">{activeAlertsCount} NOVOS</span>
-            </div>
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+      <div className="flex-1 overflow-hidden flex flex-col md:flex-row z-10">
         
         {/* List Column */}
-        <div className={`${selectedAlert ? 'hidden md:flex' : 'flex'} flex-col w-full md:w-2/5 border-r border-gray-700 bg-gray-800`}>
-          <div className="p-3 bg-gray-700 text-xs font-bold uppercase text-gray-400 flex justify-between">
-            <span>Alertas Recentes</span>
-            <span>Status</span>
+        <div className={`${selectedAlert ? 'hidden md:flex' : 'flex'} flex-col w-full md:w-2/5 border-r border-slate-700 bg-slate-800`}>
+          
+          {/* Tabs Header */}
+          <div className="flex border-b border-slate-700 bg-slate-800 sticky top-0 z-10">
+              <button 
+                onClick={() => setActiveTab('pending')}
+                className={`flex-1 py-4 text-[10px] sm:text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all ${
+                    activeTab === 'pending' 
+                    ? 'border-b-4 border-blue-500 text-white bg-slate-700' 
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                <Bell size={14} /> 
+                EM ANDAMENTO
+              </button>
+              <button 
+                onClick={() => setActiveTab('resolved')}
+                className={`flex-1 py-4 text-[10px] sm:text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all ${
+                    activeTab === 'resolved' 
+                    ? 'border-b-4 border-green-500 text-white bg-slate-700' 
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                <Archive size={14} /> 
+                RESOLVIDOS
+              </button>
           </div>
-          <div className="flex-1 overflow-y-auto">
-            {sortedAlerts.length === 0 ? (
-                <div className="p-8 text-center text-gray-500">Sem alertas ativos.</div>
+
+          {/* Infinite Scroll List */}
+          <div 
+            ref={listRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 pb-20"
+          >
+            {processedAlerts.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-500 p-8 text-center opacity-50">
+                    <div className="mb-4 bg-slate-700 p-4 rounded-full">
+                        <CheckCircle size={32} />
+                    </div>
+                    <p className="text-sm font-bold uppercase">Lista Vazia</p>
+                    <p className="text-xs">Nenhuma ocorrência nesta categoria.</p>
+                </div>
             ) : (
-                sortedAlerts.map(alert => (
+                <>
+                {visibleAlerts.map(alert => (
                     <div 
                         key={alert.id}
                         onClick={() => handleSelectAlert(alert)}
-                        className={`p-4 border-b border-gray-700 cursor-pointer active:bg-gray-600 transition-colors ${selectedAlert?.id === alert.id ? 'bg-gray-700' : ''}`}
+                        className={`
+                            p-4 border-b border-slate-700 cursor-pointer transition-colors relative group
+                            ${selectedAlert?.id === alert.id ? 'bg-slate-700' : 'hover:bg-slate-700/50'}
+                            ${alert.status === AlertStatus.NEW ? 'bg-red-900/10' : ''}
+                        `}
                     >
-                        <div className="flex justify-between mb-1">
-                            <span className={`font-bold ${alert.type === EmergencyType.POLICE_CIVIL ? 'text-blue-400' : alert.type === EmergencyType.POLICE_TRAFFIC ? 'text-orange-400' : 'text-teal-400'}`}>
+                        {/* Indicador de Novo */}
+                        {alert.status === AlertStatus.NEW && (
+                            <div className="absolute left-0 top-0 bottom-0 w-1 bg-red-600 animate-pulse"></div>
+                        )}
+                        
+                        {/* Linha 1: Tipo e Status */}
+                        <div className="flex justify-between items-start mb-2">
+                            <span className={`text-xs font-black uppercase tracking-tight px-2 py-0.5 rounded ${
+                                alert.type === EmergencyType.POLICE_CIVIL ? 'bg-blue-900/30 text-blue-400' : 
+                                alert.type === EmergencyType.POLICE_TRAFFIC ? 'bg-orange-900/30 text-orange-400' : 
+                                alert.type === EmergencyType.DISASTER ? 'bg-teal-900/30 text-teal-400' : 'bg-gray-800 text-gray-400'
+                            }`}>
                                 {alert.type}
                             </span>
-                            <span className="font-mono text-gray-300">{formatTime(alert.timestamp)}</span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                             <span className="text-sm text-gray-400 truncate flex items-center gap-1">
-                                <Phone size={12} /> {alert.contactNumber}
-                             </span>
-                             <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                                 alert.status === AlertStatus.NEW ? 'bg-red-600 text-white' : 
-                                 alert.status === AlertStatus.IN_PROGRESS ? 'bg-yellow-600 text-white' : 'bg-green-700 text-gray-200'
+                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                 alert.status === AlertStatus.NEW ? 'text-red-500 animate-pulse' : 
+                                 alert.status === AlertStatus.IN_PROGRESS ? 'text-yellow-500' : 'text-slate-500'
                              }`}>
-                                {alert.status}
+                                {alert.status === AlertStatus.NEW ? '● NOVO' : alert.status}
                              </span>
                         </div>
+                        
+                        {/* Linha 2: Nome do Usuário (Telefone) */}
+                        <div className="flex items-center gap-2 mb-1 text-slate-200">
+                             <User size={14} className="text-slate-500" />
+                             <span className="font-mono text-sm font-bold">{alert.contactNumber}</span>
+                        </div>
+
+                        {/* Linha 3: Hora */}
+                        <div className="flex items-center gap-2 mb-1 text-slate-400">
+                             <Clock size={14} className="text-slate-500" />
+                             <span className="text-xs">{formatFullDate(alert.timestamp)}</span>
+                        </div>
+
+                        {/* Linha 4: Localização */}
+                        <div className="flex items-center gap-2 text-slate-400">
+                             <MapPin size={14} className={alert.location?.lat ? "text-green-500" : "text-red-500"} />
+                             <span className="text-xs truncate">
+                                {alert.location?.lat 
+                                  ? `${alert.location.lat.toFixed(4)}, ${alert.location.lng?.toFixed(4)}`
+                                  : 'Localização Desconhecida'}
+                             </span>
+                        </div>
+
+                        {/* Botões de Ação na Lista */}
+                        {activeTab === 'pending' && (
+                            <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-slate-700/50">
+                                <button 
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        updateAlertStatus(alert.id, AlertStatus.IN_PROGRESS);
+                                    }}
+                                    disabled={alert.status === AlertStatus.IN_PROGRESS}
+                                    className={`py-2 text-[10px] font-bold uppercase rounded flex items-center justify-center gap-1 transition-colors ${
+                                        alert.status === AlertStatus.IN_PROGRESS 
+                                        ? 'bg-yellow-900/20 text-yellow-600 cursor-not-allowed' 
+                                        : 'bg-slate-700 text-slate-300 hover:bg-yellow-600 hover:text-white'
+                                    }`}
+                                >
+                                    EM ANDAMENTO
+                                </button>
+                                <button 
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        updateAlertStatus(alert.id, AlertStatus.RESOLVED);
+                                    }}
+                                    className="py-2 text-[10px] font-bold uppercase rounded flex items-center justify-center gap-1 transition-colors bg-slate-700 text-slate-300 hover:bg-green-600 hover:text-white"
+                                >
+                                    RESOLVIDO
+                                </button>
+                            </div>
+                        )}
                     </div>
-                ))
+                ))}
+                
+                {hasMore && (
+                    <div className="p-4 text-center text-slate-500 text-xs animate-pulse bg-slate-800/50 mt-2">
+                        <ArrowDownCircle size={16} className="mx-auto mb-1" />
+                        Carregando mais pedidos...
+                    </div>
+                )}
+                </>
             )}
           </div>
         </div>
 
         {/* Detail View */}
         {selectedAlert ? (
-            <div className="flex-1 flex flex-col bg-gray-900 overflow-y-auto">
-                <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-800 md:hidden">
-                    <button onClick={() => setSelectedAlert(null)} className="text-sm text-gray-300 underline">Voltar</button>
-                    <span className="font-bold">Detalhe do Alerta</span>
+            <div className="flex-1 flex flex-col bg-slate-900 overflow-y-auto">
+                <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800 md:hidden sticky top-0 z-20 shadow-md">
+                    <button onClick={() => setSelectedAlert(null)} className="text-sm text-slate-300 font-bold flex items-center gap-1">
+                        ← Voltar
+                    </button>
+                    <span className="font-bold text-sm uppercase text-slate-400">Detalhe</span>
                 </div>
 
-                <div className="p-6">
+                <div className="p-6 md:p-8 max-w-4xl mx-auto w-full">
+                    {/* Status Header */}
+                    <div className="flex items-center gap-3 mb-6">
+                        <span className={`text-xl md:text-3xl font-black uppercase ${
+                            selectedAlert.type === EmergencyType.POLICE_CIVIL ? 'text-blue-500' : 
+                            selectedAlert.type === EmergencyType.POLICE_TRAFFIC ? 'text-orange-500' : 
+                            selectedAlert.type === EmergencyType.DISASTER ? 'text-teal-500' : 'text-gray-400'
+                        }`}>
+                            {selectedAlert.type}
+                        </span>
+                        <div className="flex-1 h-px bg-slate-700"></div>
+                        <span className="font-mono text-slate-500 text-xs md:text-sm">{formatTime(selectedAlert.timestamp)}</span>
+                    </div>
+
                     {/* Key Info Cards */}
-                    <div className="grid grid-cols-2 gap-4 mb-6">
-                        <div className="bg-slate-800 p-4 rounded-lg border-l-4 border-blue-500">
-                            <label className="text-xs text-gray-400 uppercase">Cidadão (Contato)</label>
-                            <div className="text-xl font-mono text-white mt-1 flex items-center gap-2">
-                                <Phone size={20} className="text-green-500" />
-                                <a href={`tel:${selectedAlert.contactNumber}`} className="underline decoration-dotted">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                        <div className="bg-slate-800 p-5 rounded-lg border-l-4 border-blue-500 shadow-lg">
+                            <label className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Contacto do Cidadão</label>
+                            <div className="text-2xl font-mono text-white mt-1 flex items-center gap-3">
+                                <Phone size={24} className="text-green-500" />
+                                <a href={`tel:${selectedAlert.contactNumber}`} className="hover:text-green-400 transition-colors">
                                     {selectedAlert.contactNumber}
                                 </a>
                             </div>
                         </div>
-                        <div className="bg-slate-800 p-4 rounded-lg border-l-4 border-yellow-500">
-                             <label className="text-xs text-gray-400 uppercase">Tempo Decorrido</label>
+                        <div className="bg-slate-800 p-5 rounded-lg border-l-4 border-yellow-500 shadow-lg">
+                             <label className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Tempo Decorrido</label>
                              <div className="text-2xl font-bold text-white mt-1">
                                  {getElapsedTime(selectedAlert.timestamp)}
                              </div>
@@ -264,88 +563,113 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, updateAlertSt
                     </div>
 
                     {/* Description Area */}
-                    <div className="mb-6 bg-slate-800 p-4 rounded-lg border border-slate-700">
-                        <label className="text-xs text-gray-400 uppercase font-bold flex items-center gap-2 mb-2">
-                            <FileText size={14} /> Descrição da Ocorrência
+                    <div className="mb-6 bg-slate-800 p-5 rounded-lg border border-slate-700">
+                        <label className="text-[10px] text-slate-400 uppercase font-bold flex items-center gap-2 mb-3 tracking-wider">
+                            <FileText size={14} /> Relato do Incidente
                         </label>
-                        <div className={`text-lg p-2 rounded ${selectedAlert.description ? 'text-white' : 'text-gray-500 italic'}`}>
-                            {selectedAlert.description || "Nenhuma descrição fornecida pelo cidadão."}
+                        <div className={`text-lg leading-relaxed p-2 ${selectedAlert.description ? 'text-slate-200' : 'text-slate-500 italic'}`}>
+                            {selectedAlert.description || "Nenhuma descrição fornecida."}
                         </div>
                     </div>
 
-                     {/* Coordinates */}
-                     <div className="bg-slate-800 p-3 rounded mb-4 flex justify-between items-center">
-                        <span className="text-sm text-gray-400">GPS:</span>
-                        <span className="font-mono text-yellow-500">{selectedAlert.location.lat}, {selectedAlert.location.lng}</span>
-                     </div>
-
-                    {/* Map Action */}
-                    <a 
-                        href={`https://www.google.com/maps/search/?api=1&query=${selectedAlert.location.lat},${selectedAlert.location.lng}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-3 mb-6 shadow-lg transition-transform active:scale-95"
-                    >
-                        <Map size={24} />
-                        ABRIR LOCALIZAÇÃO (MAPS)
-                    </a>
-
-                    {/* Status Actions */}
+                    {/* GPS & Map */}
                     <div className="mb-8">
-                        <h3 className="text-gray-400 uppercase text-xs font-bold mb-3">Ações de Resposta</h3>
-                        <div className="flex gap-3">
-                            <button 
-                                onClick={() => updateAlertStatus(selectedAlert.id, AlertStatus.IN_PROGRESS)}
-                                className={`flex-1 py-3 rounded-lg font-bold border-2 ${selectedAlert.status === AlertStatus.IN_PROGRESS ? 'bg-yellow-600 border-yellow-500 text-white' : 'border-yellow-600 text-yellow-500'}`}
-                            >
-                                <Navigation className="mx-auto mb-1" size={20} />
-                                EM TRÂNSITO
-                            </button>
-                            <button 
-                                onClick={() => updateAlertStatus(selectedAlert.id, AlertStatus.RESOLVED)}
-                                className={`flex-1 py-3 rounded-lg font-bold border-2 ${selectedAlert.status === AlertStatus.RESOLVED ? 'bg-green-700 border-green-600 text-white' : 'border-green-700 text-green-600'}`}
-                            >
-                                <CheckCircle className="mx-auto mb-1" size={20} />
-                                RESOLVIDO
-                            </button>
+                        <div className="bg-slate-800/50 p-2 rounded mb-2 flex justify-between items-center text-xs font-mono text-slate-400">
+                           {selectedAlert.location && selectedAlert.location.lat ? (
+                               <span>COORDS: {selectedAlert.location.lat.toFixed(6)}, {selectedAlert.location.lng?.toFixed(6)}</span>
+                           ) : (
+                               <span className="text-red-400">COORDS: INDISPONÍVEL</span>
+                           )}
                         </div>
+                        
+                        {selectedAlert.location && selectedAlert.location.lat ? (
+                            <a 
+                                href={`https://www.google.com/maps/search/?api=1&query=${selectedAlert.location.lat},${selectedAlert.location.lng}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-5 rounded-xl flex items-center justify-center gap-3 shadow-lg transition-all hover:shadow-green-900/20 active:scale-95 text-lg"
+                            >
+                                <Map size={24} />
+                                ABRIR NO GOOGLE MAPS
+                            </a>
+                        ) : (
+                            <div className="w-full bg-slate-700 text-slate-400 font-bold py-5 rounded-xl flex items-center justify-center gap-3 cursor-not-allowed opacity-75">
+                                <MapPinOff size={24} />
+                                LOCALIZAÇÃO NÃO ENVIADA
+                            </div>
+                        )}
                     </div>
+
+                    {/* Botões de Ação Grandes (Detalhe) */}
+                    {selectedAlert.status !== AlertStatus.RESOLVED && (
+                        <div className="mb-8">
+                            <h3 className="text-slate-500 uppercase text-[10px] font-bold mb-3 tracking-widest">Ações do Operador</h3>
+                            <div className="flex gap-4">
+                                <button 
+                                    onClick={() => updateAlertStatus(selectedAlert.id, AlertStatus.IN_PROGRESS)}
+                                    className={`flex-1 py-4 rounded-lg font-bold border-2 transition-all ${
+                                        selectedAlert.status === AlertStatus.IN_PROGRESS 
+                                        ? 'bg-yellow-600 border-yellow-500 text-white opacity-50 cursor-not-allowed' 
+                                        : 'border-yellow-600/50 text-yellow-500 hover:bg-yellow-600/10'
+                                    }`}
+                                    disabled={selectedAlert.status === AlertStatus.IN_PROGRESS}
+                                >
+                                    <Navigation className="mx-auto mb-2" size={24} />
+                                    EM ANDAMENTO
+                                </button>
+                                <button 
+                                    onClick={() => updateAlertStatus(selectedAlert.id, AlertStatus.RESOLVED)}
+                                    className="flex-1 py-4 rounded-lg font-bold border-2 border-green-600/50 text-green-500 hover:bg-green-600 hover:text-white transition-all"
+                                >
+                                    <CheckCircle className="mx-auto mb-2" size={24} />
+                                    MARCAR RESOLVIDO
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Gemini Integration */}
-                    <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
-                        <div className="flex justify-between items-center mb-3">
-                            <h3 className="text-blue-300 font-bold flex items-center gap-2">
+                    <div className="bg-slate-800 rounded-xl p-5 border border-slate-700 shadow-xl">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-blue-400 font-bold flex items-center gap-2 text-sm uppercase tracking-wide">
                                 <BrainCircuit size={18} />
-                                IA Tática (Gemini)
+                                Assistente Tático (IA)
                             </h3>
-                            {!aiProtocol && (
+                            {!aiProtocol && isOnline && (
                                 <button 
                                     onClick={handleGenerateProtocol}
                                     disabled={loadingAi}
-                                    className="text-xs bg-blue-600 px-3 py-1 rounded text-white disabled:opacity-50"
+                                    className="text-xs bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-full text-white disabled:opacity-50 transition-colors font-bold"
                                 >
-                                    {loadingAi ? 'Gerando...' : 'Gerar Protocolo'}
+                                    {loadingAi ? 'ANALISANDO...' : 'GERAR PROTOCOLO'}
                                 </button>
                             )}
                         </div>
                         
-                        {loadingAi && <div className="text-sm text-gray-400 animate-pulse">Consultando base de dados tática...</div>}
+                        {loadingAi && (
+                            <div className="flex items-center gap-3 text-sm text-slate-400 animate-pulse p-4">
+                                <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                                <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce delay-100"></div>
+                                <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce delay-200"></div>
+                                Consultando base de dados tática...
+                            </div>
+                        )}
                         
                         {aiProtocol && (
-                            <div className="text-sm text-gray-200 leading-relaxed whitespace-pre-line bg-slate-900 p-3 rounded">
+                            <div className="text-sm text-slate-300 leading-relaxed whitespace-pre-line bg-slate-900/50 p-4 rounded border border-slate-700/50">
                                 {aiProtocol}
                             </div>
                         )}
-                         {!aiProtocol && !loadingAi && (
-                             <p className="text-xs text-gray-500">Toque para receber sugestões de procedimentos baseados no tipo de emergência.</p>
-                         )}
                     </div>
 
                 </div>
             </div>
         ) : (
-            <div className="hidden md:flex flex-1 items-center justify-center text-gray-600">
-                Selecione um alerta para ver detalhes
+            <div className="hidden md:flex flex-1 items-center justify-center text-slate-600 bg-slate-900 flex-col gap-4">
+                <div className="p-6 bg-slate-800 rounded-full">
+                    <Navigation size={64} className="opacity-50" />
+                </div>
+                <p className="font-bold uppercase tracking-widest text-sm">Selecione um alerta para despachar</p>
             </div>
         )}
 

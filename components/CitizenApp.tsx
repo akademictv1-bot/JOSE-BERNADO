@@ -1,26 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { EmergencyType, GeoLocation } from '../types';
-import { Shield, CloudLightning, Car, CheckCircle, Phone, ArrowRight, MessageSquareWarning, RefreshCcw } from 'lucide-react';
+import { enviarEmergencia } from '../services/firebaseService'; // Importar serviço Firebase
+import { Shield, CloudLightning, Car, CheckCircle, ArrowRight, MessageSquareWarning, RefreshCcw, WifiOff, MapPin, AlertTriangle } from 'lucide-react';
 
 interface CitizenAppProps {
-  onSendAlert: (type: EmergencyType, location: GeoLocation, phone: string, description: string) => void;
+  isOnline: boolean;
 }
 
-const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
+const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
   // Step 0: Input Phone & Description, Step 1: Select/SOS, Step 2: Success (Final)
   const [step, setStep] = useState<0 | 1 | 2>(0); 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [description, setDescription] = useState('');
   
   const [selectedType, setSelectedType] = useState<EmergencyType | null>(null);
+  
+  // GPS State
   const [location, setLocation] = useState<GeoLocation | null>(null);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [loadingLoc, setLoadingLoc] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const watchIdRef = useRef<number | null>(null);
 
-  // Auto-fetch location on mount to be ready
-  useEffect(() => {
-    fetchLocation();
-  }, []);
+  const [sending, setSending] = useState(false);
 
   // Timer to reset app 10 seconds after success
   useEffect(() => {
@@ -33,30 +35,74 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
     return () => clearTimeout(timer);
   }, [step]);
 
-  const fetchLocation = () => {
-    setLoadingLoc(true);
+  // Start watching GPS immediately upon mount for best accuracy
+  useEffect(() => {
+    startGpsWatch();
+    return () => stopGpsWatch();
+  }, []);
+
+  const startGpsWatch = () => {
     if (!navigator.geolocation) {
-      setErrorMsg("GPS não suportado.");
-      setLoadingLoc(false);
+      setErrorMsg("GPS não suportado neste dispositivo. O alerta será enviado sem localização.");
       return;
     }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
+
+    setLoadingLoc(true);
+    setErrorMsg(null);
+
+    const geoOptions = { 
+      enableHighAccuracy: true, 
+      timeout: 20000, 
+      maximumAge: 0 
+    };
+
+    const handleSuccess = (pos: GeolocationPosition) => {
         setLocation({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
           accuracy: pos.coords.accuracy
         });
+        setGpsAccuracy(pos.coords.accuracy);
         setLoadingLoc(false);
         setErrorMsg(null);
-      },
-      (err) => {
-        console.error(err);
+    };
+
+    const handleError = (err: GeolocationPositionError) => {
+        console.error("GPS Error:", err);
         setLoadingLoc(false);
-        setErrorMsg("Ative o GPS para enviar localização exata!");
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        
+        // Specific error handling for permissions
+        if (err.code === err.PERMISSION_DENIED) {
+            setErrorMsg("PERMISSÃO NEGADA: Ative o GPS nas configurações do telefone para enviar sua localização.");
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+            setErrorMsg("Sinal GPS indisponível. Tente ir para um local aberto.");
+        } else if (err.code === err.TIMEOUT) {
+            // Don't show error on timeout, just keep trying or fallback silently
+            console.warn("GPS Timeout");
+        }
+
+        // Don't clear location if we had one previously (stale is better than none)
+        if (!location) {
+             // We keep location null, allowing fallback
+        }
+    };
+    
+    // 1. Force a single request (Best for WebViews to trigger permission prompt)
+    navigator.geolocation.getCurrentPosition(handleSuccess, handleError, geoOptions);
+
+    // 2. Start continuous watch
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      handleSuccess,
+      handleError,
+      geoOptions
     );
+  };
+
+  const stopGpsWatch = () => {
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
   };
 
   const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -79,27 +125,45 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
   };
 
   const handleSOS = () => {
+    // FALLBACK LOGIC: If no location, send anyway with nulls
     if (!location) {
-      // Try fetching again immediately if they press SOS without lock
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition((pos) => {
-             const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-             setLocation(loc);
-             executeSend(selectedType || EmergencyType.GENERAL, loc);
-        }, () => setErrorMsg("GPS Necessário para enviar ajuda!"));
-      } else {
-        setErrorMsg("GPS Indisponível.");
-      }
+      // User is forcing send without GPS
+      executeSend(selectedType || EmergencyType.GENERAL, { lat: null, lng: null });
       return;
     }
     executeSend(selectedType || EmergencyType.GENERAL, location);
   };
 
-  const executeSend = (type: EmergencyType, loc: GeoLocation) => {
-    // Prepend country code for the backend record
+  const executeSend = async (type: EmergencyType, loc: GeoLocation) => {
     const fullNumber = `+258 ${phoneNumber}`;
-    onSendAlert(type, loc, fullNumber, description);
-    setStep(2); // Move to static success screen
+    setSending(true);
+
+    if (isOnline) {
+      try {
+        // 2. Enviar para o Firebase (accepts null lat/lng)
+        await enviarEmergencia(fullNumber, description, loc.lat, loc.lng, type);
+        setSending(false);
+        setStep(2); // Move to static success screen
+      } catch (error) {
+        console.error("Erro envio:", error);
+        setErrorMsg("Erro de conexão. Tente novamente.");
+        setSending(false);
+      }
+    } else {
+      // MODO OFFLINE (SMS Fallback)
+      let smsBody = `SOS GOGOMA! Tipo: ${type}. Tlf: ${fullNumber}. Desc: ${description}.`;
+      
+      if (loc.lat && loc.lng) {
+          const mapsLink = `https://maps.google.com/?q=${loc.lat},${loc.lng}`;
+          smsBody += ` Local: ${mapsLink}`;
+      } else {
+          smsBody += ` Local: Desconhecido (GPS Falhou)`;
+      }
+
+      window.open(`sms:112?body=${encodeURIComponent(smsBody)}`, '_self');
+      setSending(false);
+      setStep(2);
+    }
   };
 
   const handleReset = () => {
@@ -120,8 +184,16 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
         
         <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 max-w-sm w-full">
             <p className="text-lg font-medium mb-4 text-gray-200">
-                As autoridades foram notificadas da sua localização e o apoio está a caminho.
+                Todas as unidades conectadas foram notificadas.
             </p>
+            {!location && (
+                <p className="text-xs text-orange-400 mb-2 font-bold border border-orange-500/50 p-2 rounded bg-orange-900/20">
+                    Aviso: Localização GPS não foi enviada.
+                </p>
+            )}
+            {!isOnline && (
+               <p className="text-xs text-yellow-500 mb-2 font-mono">Modo Offline: Verifique se o SMS foi enviado.</p>
+            )}
             <p className="text-sm text-gray-400 border-t border-gray-600 pt-4 mt-4">
                 Mantenha a calma.
             </p>
@@ -150,6 +222,12 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
   if (step === 0) {
     return (
         <div className="flex flex-col h-full bg-slate-900 text-white p-6 justify-center">
+            {!isOnline && (
+              <div className="absolute top-0 left-0 w-full bg-yellow-900 text-yellow-200 text-center text-xs font-bold py-1 flex items-center justify-center gap-2">
+                 <WifiOff size={12} /> MODO OFFLINE (ENVIO VIA SMS)
+              </div>
+            )}
+
             <div className="mb-6 text-center">
                 <Shield size={48} className="mx-auto text-red-600 mb-4" />
                 <h1 className="text-2xl font-bold">Pedido de Socorro</h1>
@@ -193,7 +271,7 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
                     </div>
                 </div>
 
-                {errorMsg && <p className="text-red-500 text-sm text-center font-bold bg-red-900/20 p-2 rounded">{errorMsg}</p>}
+                {errorMsg && <p className="text-red-500 text-sm text-center font-bold bg-red-900/20 p-2 rounded border border-red-900/50">{errorMsg}</p>}
                 
                 <button 
                     type="submit"
@@ -212,10 +290,18 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
       {/* Header / Status Bar */}
       <div className="p-4 bg-slate-800 flex justify-between items-center shadow-md">
         <div className="flex items-center gap-2">
-          <div className={`w-3 h-3 rounded-full ${location ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`}></div>
-          <span className="text-sm font-mono text-slate-300">
-            {loadingLoc ? 'GPS...' : location ? 'GPS: OK' : 'Sem GPS'}
-          </span>
+            <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${loadingLoc ? 'bg-yellow-900/30 border-yellow-700 text-yellow-500' : location ? 'bg-green-900/30 border-green-700 text-green-500' : 'bg-red-900/30 border-red-700 text-red-500'}`}>
+                {loadingLoc ? (
+                    <MapPin size={12} className="animate-bounce" />
+                ) : location ? (
+                    <MapPin size={12} />
+                ) : (
+                    <AlertTriangle size={12} />
+                )}
+                <span className="text-xs font-mono font-bold">
+                    {loadingLoc ? 'GPS: BUSCANDO...' : location ? `GPS: OK (±${Math.round(gpsAccuracy || 0)}m)` : 'GPS: SEM SINAL'}
+                </span>
+            </div>
         </div>
         <div className="text-xs text-slate-400 font-mono">+258 {phoneNumber}</div>
       </div>
@@ -223,27 +309,41 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
       <div className="flex-1 flex flex-col p-4 gap-4">
         {/* Error Banner */}
         {errorMsg && (
-          <div className="bg-red-600 text-white p-3 rounded-lg text-center font-bold animate-pulse">
+          <div className="bg-red-600 text-white p-3 rounded-lg text-center font-bold animate-pulse text-sm">
             {errorMsg}
           </div>
+        )}
+        
+        {!location && !loadingLoc && !errorMsg && (
+             <div className="bg-orange-600/20 border border-orange-500 text-orange-200 p-2 rounded text-center text-xs">
+                 Aviso: GPS não detetado. O alerta será enviado sem localização exata.
+             </div>
         )}
 
         {/* SOS Button Area */}
         <div className="flex-1 flex items-center justify-center py-4">
           <button
             onClick={handleSOS}
+            disabled={sending}
             className={`
               w-64 h-64 rounded-full flex flex-col items-center justify-center
               bg-red-600 shadow-2xl border-8 border-red-800
               active:scale-95 transition-transform duration-100
-              ${!selectedType ? 'animate-pulse-red' : ''}
+              ${!selectedType && !sending ? 'animate-pulse-red' : ''}
+              ${sending ? 'opacity-50 cursor-wait' : ''}
             `}
           >
-            <span className="text-6xl font-black tracking-tighter">SOS</span>
-            <span className="text-sm mt-2 uppercase font-semibold">
-              {selectedType ? 'Enviar Agora' : 'Emergência'}
-            </span>
-            <span className="text-xs mt-1 opacity-75">Toque para Ajuda</span>
+            {sending ? (
+              <span className="text-2xl font-black animate-pulse">ENVIANDO...</span>
+            ) : (
+              <>
+                <span className="text-6xl font-black tracking-tighter">SOS</span>
+                <span className="text-sm mt-2 uppercase font-semibold">
+                  {selectedType ? 'Enviar Agora' : 'Emergência'}
+                </span>
+                <span className="text-xs mt-1 opacity-75">Toque para Ajuda</span>
+              </>
+            )}
           </button>
         </div>
 
@@ -284,13 +384,6 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ onSendAlert }) => {
             <CloudLightning size={32} />
             <span className="text-xs font-bold text-center leading-tight">CLIMA</span>
           </button>
-        </div>
-
-        {/* Footer info */}
-        <div className="text-center text-slate-500 text-xs mb-2">
-          {location && (
-            <p>Lat: {location.lat.toFixed(4)}, Lng: {location.lng.toFixed(4)}</p>
-          )}
         </div>
       </div>
     </div>

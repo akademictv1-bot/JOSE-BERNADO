@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <meta http-equiv="Permissions-Policy" content="geolocation=(self), microphone=()" />
     <title>GOGOMA</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -29,12 +30,28 @@
     "react": "https://aistudiocdn.com/react@^19.2.0",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0"
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
+    "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js",
+    "firebase/messaging": "https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging.js",
+    "firebase/": "https://aistudiocdn.com/firebase@^12.6.0/"
   }
 }
 </script>
 </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Registrar Service Worker para Notificações FCM
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/firebase-messaging-sw.js')
+          .then(function(registration) {
+            console.log('Service Worker registrado com sucesso:', registration);
+          })
+          .catch(function(err) {
+            console.log('Falha ao registrar Service Worker:', err);
+          });
+      }
+    </script>
   </body>
 </html>

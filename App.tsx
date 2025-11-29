@@ -2,19 +2,16 @@ import React, { useState, useEffect } from 'react';
 import CitizenApp from './components/CitizenApp';
 import PoliceDashboard from './components/PoliceDashboard';
 import { EmergencyAlert, EmergencyType, GeoLocation, AlertStatus } from './types';
-import { Smartphone, Siren, Activity } from 'lucide-react';
-
-const STORAGE_KEY = 'moz_emergency_alerts_db';
+import { Smartphone, Siren, Activity, Radio, Wifi, WifiOff } from 'lucide-react';
+import { escutarEmergencias } from './services/firebaseService';
 
 const App: React.FC = () => {
   const [showSplash, setShowSplash] = useState(true);
   const [viewMode, setViewMode] = useState<'citizen' | 'police'>('citizen');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   
-  // Load initial alerts from localStorage to simulate persistent DB
-  const [alerts, setAlerts] = useState<EmergencyAlert[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : [];
-  });
+  // Lista de alertas vinda do Firebase (Realtime)
+  const [alerts, setAlerts] = useState<EmergencyAlert[]>([]);
 
   // Splash Screen Timer
   useEffect(() => {
@@ -24,43 +21,31 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, []);
 
-  // Sync with localStorage whenever alerts change (Simulate sending to Backend)
+  // Monitorar conexão de internet
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(alerts));
-  }, [alerts]);
-
-  // Listen for changes from other tabs (Simulate Real-time Socket Recieving)
-  useEffect(() => {
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY && e.newValue) {
-        setAlerts(JSON.parse(e.newValue));
-      }
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
     };
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Handler for when Citizen sends an alert
-  const handleNewAlert = (type: EmergencyType, location: GeoLocation, phone: string, description: string) => {
-    const newAlert: EmergencyAlert = {
-      id: Math.random().toString(36).substr(2, 9),
-      type,
-      location,
-      timestamp: Date.now(),
-      status: AlertStatus.NEW,
-      contactNumber: phone,
-      description: description
-    };
+  // 1. Escutar Emergências do Firebase (Substitui localStorage)
+  useEffect(() => {
+    // A função retorna o unsubscribe (off)
+    const unsubscribe = escutarEmergencias((novosAlertas) => {
+      setAlerts(novosAlertas);
+    });
 
-    setAlerts(prev => [newAlert, ...prev]);
-  };
+    // Cleanup ao desmontar
+    return () => unsubscribe();
+  }, []);
 
-  // Handler for Police updating status
-  const handleUpdateStatus = (id: string, status: AlertStatus) => {
-    setAlerts(prev => prev.map(alert => 
-      alert.id === id ? { ...alert, status } : alert
-    ));
-  };
+  // Verificar se existem alertas pendentes (NOVO)
+  const hasPendingAlerts = alerts.some(a => a.status === AlertStatus.NEW);
 
   // --- SPLASH SCREEN RENDER ---
   if (showSplash) {
@@ -86,36 +71,53 @@ const App: React.FC = () => {
 
   return (
     <div className="h-screen w-full overflow-hidden flex flex-col">
-      {/* Simulation Toggle Bar - Allows user to switch roles */}
-      <div className="bg-black text-white p-2 flex justify-center items-center gap-4 text-xs border-b border-gray-800 z-50">
-        <span className="uppercase tracking-widest text-gray-500 hidden md:inline">Modo de Simulação:</span>
-        <button 
-          onClick={() => setViewMode('citizen')}
-          className={`flex items-center gap-2 px-4 py-1 rounded-full transition-all ${viewMode === 'citizen' ? 'bg-red-600 text-white font-bold' : 'bg-gray-800 text-gray-400'}`}
-        >
-          <Smartphone size={14} /> Cidadão
-        </button>
-        <button 
-          onClick={() => setViewMode('police')}
-          className={`flex items-center gap-2 px-4 py-1 rounded-full transition-all ${viewMode === 'police' ? 'bg-blue-600 text-white font-bold' : 'bg-gray-800 text-gray-400'}`}
-        >
-          <Siren size={14} /> Posto Policial
-          {/* Notification Badge on toggle */}
-          {alerts.some(a => a.status === AlertStatus.NEW) && (
-             <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-             </span>
-          )}
-        </button>
+      {/* 3. Indicador Global Vermelho (Barra de Topo) */}
+      <div className="bg-black text-white p-2 flex justify-between items-center text-xs border-b border-gray-800 z-50 relative">
+        
+        {/* Lado Esquerdo: Seletor de Modo */}
+        <div className="flex items-center gap-2">
+            <button 
+              onClick={() => setViewMode('citizen')}
+              className={`flex items-center gap-2 px-3 py-1 rounded-full transition-all ${viewMode === 'citizen' ? 'bg-slate-800 text-white border border-slate-600' : 'text-gray-500'}`}
+            >
+              <Smartphone size={14} /> <span className="hidden sm:inline">Cidadão</span>
+            </button>
+            <button 
+              onClick={() => setViewMode('police')}
+              className={`flex items-center gap-2 px-3 py-1 rounded-full transition-all ${viewMode === 'police' ? 'bg-slate-800 text-white border border-slate-600' : 'text-gray-500'}`}
+            >
+              <Siren size={14} /> <span className="hidden sm:inline">Polícia</span>
+            </button>
+        </div>
+
+        {/* Centro/Direita: Indicador de Alerta Pendente */}
+        <div className="flex items-center gap-4">
+             {/* INDICADOR GLOBAL DE EMERGÊNCIA */}
+             {hasPendingAlerts ? (
+                <div className="flex items-center gap-2 bg-red-900/50 px-3 py-1 rounded border border-red-600 animate-pulse">
+                    <div className="w-3 h-3 bg-red-500 rounded-full animate-ping"></div>
+                    <span className="text-red-400 font-bold tracking-widest uppercase">ALERTA ATIVO</span>
+                </div>
+             ) : (
+                <div className="flex items-center gap-2 opacity-30">
+                    <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                    <span className="text-[10px] tracking-widest uppercase">Monitorando</span>
+                </div>
+             )}
+
+             {/* Indicador de Conexão */}
+             <div className="flex items-center gap-1">
+                {isOnline ? <Wifi size={14} className="text-green-500"/> : <WifiOff size={14} className="text-red-500"/>}
+             </div>
+        </div>
       </div>
 
       {/* Main View Container */}
       <div className="flex-1 relative bg-gray-900">
         {viewMode === 'citizen' ? (
-          <CitizenApp onSendAlert={handleNewAlert} />
+          <CitizenApp isOnline={isOnline} />
         ) : (
-          <PoliceDashboard alerts={alerts} updateAlertStatus={handleUpdateStatus} />
+          <PoliceDashboard alerts={alerts} isOnline={isOnline} />
         )}
       </div>
     </div>

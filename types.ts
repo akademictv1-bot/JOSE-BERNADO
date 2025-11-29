@@ -12,8 +12,8 @@ export enum AlertStatus {
 }
 
 export interface GeoLocation {
-  lat: number;
-  lng: number;
+  lat: number | null; // Allow null for fallback
+  lng: number | null; // Allow null for fallback
   accuracy?: number;
 }
 
@@ -24,7 +24,7 @@ export interface EmergencyAlert {
   timestamp: number; // Unix timestamp
   status: AlertStatus;
   description?: string; // Optional description
-  contactNumber: string; // NEW: Mandatory contact number
+  contactNumber: string; // Mandatory contact number
   aiAdvice?: string; // Field for Gemini generated advice
 }
 
