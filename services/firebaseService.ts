@@ -1,4 +1,4 @@
-import { initializeApp } from "firebase/app";
+import * as firebaseApp from "firebase/app";
 import { getDatabase, ref, push, onValue, update, set, get, child } from "firebase/database";
 import { getMessaging, getToken, onMessage } from "firebase/messaging";
 import { AlertStatus, EmergencyType, GeoLocation, EmergencyAlert } from "../types";
@@ -15,26 +15,24 @@ const firebaseConfig = {
 };
 
 // Inicializar Firebase
-const app = initializeApp(firebaseConfig);
+const app = firebaseApp.initializeApp(firebaseConfig);
 const db = getDatabase(app);
 let messaging: any = null;
 
-// Inicializar Messaging apenas se suportado (evita erros em ambientes restritos)
+// Inicializar Messaging apenas se suportado
 try {
   messaging = getMessaging(app);
 } catch (e) {
   console.warn("Firebase Messaging não suportado neste navegador.", e);
 }
 
-// CHAVE DO SERVIDOR (Legacy) - NECESSÁRIA PARA ENVIAR NOTIFICAÇÕES SEM BACKEND
-// Você deve pegar isso no Firebase Console -> Configurações -> Cloud Messaging
-const FCM_SERVER_KEY = "SUA_SERVER_KEY_AQUI_SUBSTITUA_NO_CODIGO"; 
+// CHAVE DO SERVIDOR PARA ENVIAR NOTIFICAÇÕES (Legacy API Key)
+// ATENÇÃO: Substitua pela sua Server Key real do console do Firebase para que o envio funcione
+const FCM_SERVER_KEY = "SUA_SERVER_KEY_AQUI"; 
 
 /**
  * 1. Função enviarEmergencia
- * Envia os dados para o nó "notificacoes" no Firebase.
- * Aceita latitude/longitude como null para fallback.
- * AGORA TAMBÉM DISPARA A NOTIFICAÇÃO PUSH.
+ * Envia dados para o DB e dispara notificação PUSH.
  */
 export const enviarEmergencia = async (
   numero: string, 
@@ -59,13 +57,15 @@ export const enviarEmergencia = async (
 
   await push(alertasRef, novoAlerta);
 
-  // Disparar Notificação Push para os Policiais
-  await enviarNotificacaoPushParaTodos(tipo);
+  // 4) Quando cidadão cria pedido, envia notificação push para polícias
+  await enviarNotificacaoPushParaTodos(
+    "🚨 Novo Pedido de Socorro",
+    "Um cidadão pediu ajuda. Clique para abrir."
+  );
 };
 
 /**
  * 2. Função escutarEmergencias
- * Escuta o nó "notificacoes" em tempo real.
  */
 export const escutarEmergencias = (callback: (alertas: EmergencyAlert[]) => void) => {
   const alertasRef = ref(db, 'notificacoes');
@@ -85,7 +85,7 @@ export const escutarEmergencias = (callback: (alertas: EmergencyAlert[]) => void
 };
 
 /**
- * Atualizar o status de uma emergência
+ * Atualizar status
  */
 export const atualizarStatusEmergencia = async (id: string, novoStatus: AlertStatus) => {
   const alertaRef = ref(db, `notificacoes/${id}`);
@@ -97,7 +97,7 @@ export const atualizarStatusEmergencia = async (id: string, novoStatus: AlertSta
 // --- FUNÇÕES DE NOTIFICAÇÃO (FCM) ---
 
 /**
- * Solicita permissão ao usuário (Policial) e salva o token no DB
+ * 2) & 3) Solicita permissão e grava token em 'policias/{ID}/token'
  */
 export const solicitarPermissaoNotificacao = async (badgeId: string) => {
   if (!messaging) return;
@@ -105,14 +105,15 @@ export const solicitarPermissaoNotificacao = async (badgeId: string) => {
   try {
     const permission = await Notification.requestPermission();
     if (permission === 'granted') {
+      // INSERIDO: Chave VAPID fornecida pelo usuário
       const token = await getToken(messaging, {
-        vapidKey: "BOyF-uYp2sO_..._SUA_VAPID_KEY_AQUI" // Opcional se usar configuração padrão
+        vapidKey: "BJjEAoUmes2nPKi3nc4YA9ORy29oaUCDnTLYSc6Lw5t_oY-FlYyTUBDcyFRaceJAbTBND7cFwfAGOhZAwPbGrEQ"
       });
       
       if (token) {
-        console.log("Token FCM gerado:", token);
-        // Salvar token na tabela 'usuarios'
-        await salvarTokenNoBanco(badgeId, token);
+        console.log("Token FCM gerado e salvo para o agente:", badgeId);
+        // Salvar token na tabela 'policias' conforme solicitado
+        await salvarTokenPolicia(badgeId, token);
       }
     }
   } catch (error) {
@@ -121,18 +122,19 @@ export const solicitarPermissaoNotificacao = async (badgeId: string) => {
 };
 
 /**
- * Salva o token device_token na tabela usuarios/{badgeId}
+ * Salva o token device_token na tabela policias/{badgeId}/token
  */
-const salvarTokenNoBanco = async (badgeId: string, token: string) => {
-  const userRef = ref(db, `usuarios/${badgeId}`);
+const salvarTokenPolicia = async (badgeId: string, token: string) => {
+  // Caminho exato solicitado: policias/{ID_do_polícia}/token
+  const userRef = ref(db, `policias/${badgeId}`);
   await update(userRef, {
-    device_token: token,
+    token: token,
     last_login: Date.now()
   });
 };
 
 /**
- * Função Listener para mensagens em Foreground (App aberto)
+ * Listener Foreground
  */
 export const onMessageListener = () => {
   if (!messaging) return Promise.resolve(null);
@@ -144,36 +146,38 @@ export const onMessageListener = () => {
 };
 
 /**
- * LÓGICA DE ENVIO (Client-Side)
- * Lê todos os tokens de 'usuarios' e envia fetch para o Google FCM.
+ * 9) LÓGICA DE ENVIO (Script de Envio)
+ * Lê tokens de 'policias' e envia POST para FCM.
  */
-const enviarNotificacaoPushParaTodos = async (tipoEmergencia: string) => {
-  if (FCM_SERVER_KEY.includes("SUA_SERVER_KEY")) {
-    console.warn("FCM: Chave do servidor não configurada. Notificação Push ignorada.");
+export const enviarNotificacaoPushParaTodos = async (titulo: string, corpo: string) => {
+  // Verificação de segurança simples
+  if (!FCM_SERVER_KEY || FCM_SERVER_KEY.includes("SUA_SERVER_KEY")) {
+    console.warn("FCM: Chave do servidor não configurada. Notificação Push ignorada. Obtenha a Server Key no Console do Firebase.");
     return;
   }
 
   try {
-    // 1. Ler todos os usuários para pegar os tokens
+    // 1. Ler todos os policias para pegar os tokens
     const dbRef = ref(db);
-    const snapshot = await get(child(dbRef, `usuarios`));
+    const snapshot = await get(child(dbRef, `policias`));
     
     if (snapshot.exists()) {
-      const usuarios = snapshot.val();
+      const policias = snapshot.val();
       const tokens: string[] = [];
 
-      // Extrair tokens
-      Object.keys(usuarios).forEach((key) => {
-        const u = usuarios[key];
-        if (u.device_token) {
-          tokens.push(u.device_token);
+      // Extrair tokens salvos na estrutura policias/{id}/token
+      Object.keys(policias).forEach((key) => {
+        const p = policias[key];
+        if (p && p.token) {
+          tokens.push(p.token);
         }
       });
 
       if (tokens.length === 0) return;
 
-      // 2. Enviar notificação para cada token (ou multicast se suportado)
-      // Nota: Client-side iterar é a única forma sem backend Cloud Function
+      console.log(`Enviando Push para ${tokens.length} policiais...`);
+
+      // 2. Enviar notificação para cada token
       const promises = tokens.map(token => {
         return fetch('https://fcm.googleapis.com/fcm/send', {
           method: 'POST',
@@ -184,10 +188,10 @@ const enviarNotificacaoPushParaTodos = async (tipoEmergencia: string) => {
           body: JSON.stringify({
             to: token,
             notification: {
-              title: "Nova Ocorrência GOGOMA",
-              body: `Há um novo pedido de socorro: ${tipoEmergencia}`,
-              icon: "/icon.png", // Certifique-se de ter um ícone
-              click_action: "https://gogoma.app/" // URL do seu app
+              title: titulo,
+              body: corpo,
+              icon: "/icon.png",
+              click_action: "https://gogoma.app/" // URL do app
             },
             priority: "high"
           })
@@ -195,7 +199,7 @@ const enviarNotificacaoPushParaTodos = async (tipoEmergencia: string) => {
       });
 
       await Promise.all(promises);
-      console.log(`Notificação enviada para ${tokens.length} dispositivos.`);
+      console.log("Notificações enviadas com sucesso.");
     }
   } catch (error) {
     console.error("Erro ao enviar notificações Push:", error);

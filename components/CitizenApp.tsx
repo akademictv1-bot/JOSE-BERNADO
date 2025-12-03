@@ -116,10 +116,22 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
 
   const handlePhoneSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // 1. Validar Comprimento
     if (phoneNumber.length !== 9) {
       setErrorMsg("O número deve ter exactamente 9 dígitos.");
       return;
     }
+
+    // 2. Validar Prefixos de Moçambique (82, 83, 84, 85, 86, 87)
+    const prefix = phoneNumber.substring(0, 2);
+    const validPrefixes = ['82', '83', '84', '85', '86', '87'];
+    
+    if (!validPrefixes.includes(prefix)) {
+        setErrorMsg("Número inválido. Deve começar com 82, 83, 84, 85, 86 ou 87.");
+        return;
+    }
+
     setErrorMsg(null);
     setStep(1); // Move to SOS screen
   };
@@ -246,7 +258,7 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
                         
                         <input 
                             type="tel" 
-                            placeholder="84 / 85 ..."
+                            placeholder="84 / 85 / 86 / 87"
                             className="w-full bg-slate-800 border border-slate-700 rounded-xl p-4 pl-20 text-xl font-mono tracking-widest focus:outline-none focus:border-red-500 transition-colors placeholder:text-slate-600 text-white"
                             value={phoneNumber}
                             onChange={handlePhoneChange}
@@ -255,6 +267,7 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
                         />
                     </div>
                     <p className="text-[10px] text-slate-500 mt-1 text-right">{phoneNumber.length}/9 dígitos</p>
+                    <p className="text-[10px] text-slate-500 mt-0 text-left">Prefixos aceites: 82, 83, 84, 85, 86, 87</p>
                 </div>
 
                 {/* Description Input */}

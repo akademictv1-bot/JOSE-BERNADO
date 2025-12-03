@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { EmergencyAlert, AlertStatus, EmergencyType } from '../types';
 import { getPoliceProtocol } from '../services/geminiService';
-import { atualizarStatusEmergencia, solicitarPermissaoNotificacao, onMessageListener } from '../services/firebaseService'; // Importar serviço FCM
-import { Bell, Map, Phone, Navigation, BrainCircuit, Lock, CheckCircle, FileText, LogOut, Wifi, WifiOff, Archive, AlertCircle, Clock, ArrowDownCircle, MapPin, User, Calendar, MapPinOff } from 'lucide-react';
+import { atualizarStatusEmergencia, solicitarPermissaoNotificacao, onMessageListener, enviarNotificacaoPushParaTodos } from '../services/firebaseService'; // Importar serviço FCM
+import { Bell, Map, Phone, Navigation, BrainCircuit, Lock, CheckCircle, FileText, LogOut, Wifi, WifiOff, Archive, AlertCircle, Clock, ArrowDownCircle, MapPin, User, Calendar, MapPinOff, Activity, BarChart3 } from 'lucide-react';
 
 interface PoliceDashboardProps {
   alerts: EmergencyAlert[];
@@ -27,18 +27,19 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
   const [activeTab, setActiveTab] = useState<'pending' | 'resolved'>('pending');
 
   // --- PAGINAÇÃO DINÂMICA ---
-  const [visibleCount, setVisibleCount] = useState(10);
+  const [visibleCount, setVisibleCount] = useState(20); // Carregar 20 por vez
   const listRef = useRef<HTMLDivElement>(null);
 
   // Audio & Alarm State
   const audioCtxRef = useRef<AudioContext | null>(null);
   const activeOscillatorRef = useRef<OscillatorNode | null>(null);
   const alarmIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastPushTimeRef = useRef<number>(0); // Controla debounce de push repetido
   const [isAlarmRinging, setIsAlarmRinging] = useState(false); // Para o alerta visual (tela piscando)
 
   // Resetar contagem ao trocar de aba (Lógica de refresh)
   useEffect(() => {
-    setVisibleCount(10);
+    setVisibleCount(20);
     if (listRef.current) listRef.current.scrollTop = 0;
   }, [activeTab]);
 
@@ -46,11 +47,27 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
   const handleScroll = () => {
     if (listRef.current) {
       const { scrollTop, scrollHeight, clientHeight } = listRef.current;
-      if (scrollTop + clientHeight >= scrollHeight - 20) {
-        setVisibleCount(prev => prev + 10);
+      // Carregar mais quando estiver perto do fim (50px de margem)
+      if (scrollTop + clientHeight >= scrollHeight - 50) {
+        setVisibleCount(prev => prev + 20);
       }
     }
   };
+
+  // Estatísticas de 24 Horas (Dinâmico)
+  const stats24h = useMemo(() => {
+    const now = Date.now();
+    const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
+    
+    // Filtrar alertas válidos das últimas 24h
+    const recentAlerts = alerts.filter(a => a.timestamp && a.timestamp > twentyFourHoursAgo);
+
+    return {
+        total: recentAlerts.length,
+        pending: recentAlerts.filter(a => a.status !== AlertStatus.RESOLVED).length,
+        resolved: recentAlerts.filter(a => a.status === AlertStatus.RESOLVED).length
+    };
+  }, [alerts]);
 
   // Inicializar Listener de Notificações quando autenticado
   useEffect(() => {
@@ -59,6 +76,7 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
             .then((payload: any) => {
                 if (payload) {
                     console.log("Notificação recebida em foreground:", payload);
+                    // Opcional: Mostrar toast ou alerta visual extra
                 }
             })
             .catch(err => console.log('failed: ', err));
@@ -89,36 +107,49 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
   const visibleAlerts = processedAlerts.slice(0, visibleCount);
   const hasMore = visibleCount < processedAlerts.length;
 
-  // --- LÓGICA DE ALARME INTELIGENTE ---
-  // Condições para tocar:
-  // 1. Existe alerta com status NEW.
-  // 2. Existe alerta não resolvido há mais de 1 HORA (3600000 ms).
-  const hasCriticalAlerts = () => {
+  // --- LÓGICA DE ALARME E NOTIFICAÇÃO INTELIGENTE ---
+  const checkCriticalAlerts = () => {
       const now = Date.now();
       const hasNew = alerts.some(a => a.status === AlertStatus.NEW);
-      // Regra de 1 Hora: Repetir alarme se pedido não foi atendido
-      const hasLongUnresolved = alerts.some(a => 
+      
+      // 8) Regra de 1 Hora: Alerta não atendido > 1h
+      const longUnresolvedAlerts = alerts.filter(a => 
           a.status !== AlertStatus.RESOLVED && (now - a.timestamp > 3600000)
       );
-      return hasNew || hasLongUnresolved;
+      const hasLongUnresolved = longUnresolvedAlerts.length > 0;
+
+      // Retorna true se precisar tocar alarme
+      if (hasNew || hasLongUnresolved) {
+          
+          // Lógica extra para REENVIAR PUSH se passar de 1h
+          // Usamos um debounce de 5 minutos para não floodar o Firebase se a aba estiver aberta
+          if (hasLongUnresolved && (now - lastPushTimeRef.current > 300000)) {
+              console.log("⚠️ Alerta pendente > 1h detectado. Reenviando Push...");
+              enviarNotificacaoPushParaTodos(
+                  "⏳ Alerta Crítico Pendente",
+                  "Existe um pedido de socorro sem resposta há mais de 1 hora!"
+              );
+              lastPushTimeRef.current = now;
+          }
+          
+          return true;
+      }
+      return false;
   };
 
   useEffect(() => {
-    const shouldRing = hasCriticalAlerts();
+    // 7) O alarme não toca se não houver pedidos ativos (checkCriticalAlerts valida isso)
+    const shouldRing = checkCriticalAlerts();
 
     if (isAuthenticated && shouldRing) {
-        // Se já existe ciclo, não reinicia, mantém o ritmo.
         if (!alarmIntervalRef.current) {
-            console.log("🚨 ALARME DISPARADO: Novo incidente ou Atraso > 1h");
+            console.log("🚨 ALARME DISPARADO");
             
-            // Tocar primeira vez imediatamente
             triggerSirenSequence(); 
             
-            // Configurar ciclo: Toca 10s, espera 30s = Repete a cada 40s
+            // Repetir a cada 40s (10s som + 30s silencio)
             alarmIntervalRef.current = setInterval(() => {
-                // Verificar novamente dentro do intervalo se ainda precisa tocar
-                // (Caso todos tenham sido resolvidos durante a pausa de 30s)
-                if (hasCriticalAlerts()) {
+                if (checkCriticalAlerts()) {
                     triggerSirenSequence();
                 } else {
                     stopAlarm();
@@ -132,7 +163,7 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
     return () => {
         if (!isAuthenticated) stopAlarm();
     };
-  }, [alerts, isAuthenticated]); // Dependência em 'alerts' garante reavaliação a cada update do Firebase
+  }, [alerts, isAuthenticated]);
 
   const stopAlarm = () => {
     if (alarmIntervalRef.current) {
@@ -154,10 +185,9 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
   };
 
   const triggerSirenSequence = () => {
-    setIsAlarmRinging(true); // Ativa alerta visual
+    setIsAlarmRinging(true);
     triggerSirenSound();
     
-    // Parar som e visual após 10 segundos
     setTimeout(() => {
         stopSirenSound();
         setIsAlarmRinging(false);
@@ -165,7 +195,6 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
   };
 
   const triggerSirenSound = () => {
-    // Tocar vibração (padrão SOS longo)
     if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
         navigator.vibrate([1000, 500, 1000, 500, 1000, 500, 2000]);
     }
@@ -177,7 +206,7 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
         const ctx = audioCtxRef.current;
         if (ctx.state === 'suspended') ctx.resume();
 
-        stopSirenSound(); // Garante limpeza anterior
+        stopSirenSound();
 
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -186,20 +215,16 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
         gain.connect(ctx.destination);
 
         const now = ctx.currentTime;
-        const duration = 10; // 10 segundos exatos
+        const duration = 10;
 
-        // Configurar Sirene Policial (Sawtooth com Modulação)
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(600, now);
 
-        // Efeito "Wail" (Sobe e desce rápido)
-        // 10 loops de 1 segundo cada
         for (let i = 0; i < duration; i++) {
-            osc.frequency.linearRampToValueAtTime(1500, now + i + 0.5); // Sobe
-            osc.frequency.linearRampToValueAtTime(600, now + i + 1.0);  // Desce
+            osc.frequency.linearRampToValueAtTime(1500, now + i + 0.5);
+            osc.frequency.linearRampToValueAtTime(600, now + i + 1.0);
         }
 
-        // Volume Envelope (Fade in/out)
         gain.gain.setValueAtTime(0, now);
         gain.gain.linearRampToValueAtTime(0.5, now + 0.5);
         gain.gain.setValueAtTime(0.5, now + duration - 0.5);
@@ -226,10 +251,11 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
         setIsAuthenticated(true);
         localStorage.setItem('gogoma_police_auth', 'true');
         setAuthError(false);
-        // Inicializar contexto de áudio no clique (interação do usuário)
         if (!audioCtxRef.current) {
              audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         }
+        
+        // 2) e 3) Obter Token e salvar em policias/{ID}/token
         await solicitarPermissaoNotificacao(badgeId);
     } else {
         setAuthError(true);
@@ -284,6 +310,11 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
     if (minutes < 1) return 'Agora';
     if (minutes > 60) return `${Math.floor(minutes/60)}h ${minutes%60}m atrás`;
     return `${minutes} min atrás`;
+  };
+
+  const handleRefresh = () => {
+      setVisibleCount(20);
+      if (listRef.current) listRef.current.scrollTop = 0;
   };
 
   // --- AUTH SCREEN ---
@@ -381,6 +412,16 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
         {/* List Column */}
         <div className={`${selectedAlert ? 'hidden md:flex' : 'flex'} flex-col w-full md:w-2/5 border-r border-slate-700 bg-slate-800`}>
           
+          {/* Botão de Refresh Manual */}
+          <div className="bg-slate-800 p-2 border-b border-slate-700 flex justify-center">
+               <button 
+                onClick={handleRefresh}
+                className="w-full py-2 bg-slate-700/50 hover:bg-slate-700 rounded text-xs text-slate-400 hover:text-white font-bold uppercase tracking-wider transition-colors"
+               >
+                   Atualizar Lista
+               </button>
+          </div>
+
           {/* Tabs Header */}
           <div className="flex border-b border-slate-700 bg-slate-800 sticky top-0 z-10">
               <button 
@@ -407,11 +448,29 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
               </button>
           </div>
 
+          {/* ESTATÍSTICAS DE 24H (NOVO) */}
+          <div className="bg-slate-900/50 p-2 border-b border-slate-700 flex justify-around items-center text-[10px] text-slate-400 font-mono shadow-inner">
+                <div className="flex items-center gap-1" title="Total nas últimas 24h">
+                    <Activity size={12} className="text-blue-500"/>
+                    <span>24H: <b className="text-white text-sm">{stats24h.total}</b></span>
+                </div>
+                <div className="h-4 w-px bg-slate-700"></div>
+                <div className="flex items-center gap-1" title="Pendentes nas últimas 24h">
+                    <AlertCircle size={12} className="text-yellow-500"/>
+                    <span>PEND: <b className="text-white text-sm">{stats24h.pending}</b></span>
+                </div>
+                <div className="h-4 w-px bg-slate-700"></div>
+                <div className="flex items-center gap-1" title="Resolvidos nas últimas 24h">
+                    <CheckCircle size={12} className="text-green-500"/>
+                    <span>RES: <b className="text-white text-sm">{stats24h.resolved}</b></span>
+                </div>
+          </div>
+
           {/* Infinite Scroll List */}
           <div 
             ref={listRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 pb-20"
+            className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-slate-800 pb-20 touch-pan-y overscroll-contain"
           >
             {processedAlerts.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-slate-500 p-8 text-center opacity-50">

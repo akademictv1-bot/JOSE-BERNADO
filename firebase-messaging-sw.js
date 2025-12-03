@@ -17,17 +17,28 @@ firebase.initializeApp(firebaseConfig);
 
 const messaging = firebase.messaging();
 
-// Handler de mensagens em background
+// Handler de mensagens em background (App Fechado)
 messaging.onBackgroundMessage((payload) => {
   console.log('[firebase-messaging-sw.js] Notificação recebida em background ', payload);
   
-  const notificationTitle = payload.notification.title;
-  const notificationOptions = {
-    body: payload.notification.body,
-    icon: payload.notification.icon || '/icon.png', // Fallback icon
-    vibrate: [200, 100, 200],
-    data: payload.data
-  };
+  if (payload.notification) {
+    const notificationTitle = payload.notification.title;
+    const notificationOptions = {
+      body: payload.notification.body,
+      icon: payload.notification.icon || '/icon.png',
+      vibrate: [200, 100, 200],
+      data: payload.data
+    };
 
-  self.registration.showNotification(notificationTitle, notificationOptions);
+    self.registration.showNotification(notificationTitle, notificationOptions);
+  }
+});
+
+self.addEventListener('notificationclick', function(event) {
+  console.log('[Service Worker] Notification click Received.');
+  event.notification.close();
+  // Abre o app ao clicar na notificação
+  event.waitUntil(
+    clients.openWindow('https://gogoma.app/') 
+  );
 });
