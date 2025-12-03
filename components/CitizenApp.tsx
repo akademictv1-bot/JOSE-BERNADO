@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { EmergencyType, GeoLocation } from '../types';
 import { enviarEmergencia } from '../services/firebaseService'; // Importar serviço Firebase
-import { Shield, CloudLightning, Car, CheckCircle, ArrowRight, MessageSquareWarning, RefreshCcw, WifiOff, MapPin, AlertTriangle } from 'lucide-react';
+import { Shield, CloudLightning, Car, CheckCircle, ArrowRight, MessageSquareWarning, RefreshCcw, WifiOff, MapPin, AlertTriangle, MapPinned } from 'lucide-react';
 
 interface CitizenAppProps {
   isOnline: boolean;
@@ -13,6 +13,9 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [description, setDescription] = useState('');
   
+  // Location Form State - SINGLE FIELD
+  const [manualAddress, setManualAddress] = useState('');
+
   const [selectedType, setSelectedType] = useState<EmergencyType | null>(null);
   
   // GPS State
@@ -117,18 +120,23 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
   const handlePhoneSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    // 1. Validar Comprimento
+    // 1. Validar Comprimento Telefone
     if (phoneNumber.length !== 9) {
       setErrorMsg("O número deve ter exactamente 9 dígitos.");
       return;
     }
 
-    // 2. Validar Prefixos de Moçambique (82, 83, 84, 85, 86, 87)
+    // 2. Validar Prefixos
     const prefix = phoneNumber.substring(0, 2);
     const validPrefixes = ['82', '83', '84', '85', '86', '87'];
-    
     if (!validPrefixes.includes(prefix)) {
         setErrorMsg("Número inválido. Deve começar com 82, 83, 84, 85, 86 ou 87.");
+        return;
+    }
+
+    // 3. Validar Localização Manual (Campo Obrigatório)
+    if (!manualAddress || manualAddress.trim().length < 5) {
+        setErrorMsg("Por favor, escreva a sua localização (Província, Cidade, Bairro).");
         return;
     }
 
@@ -152,8 +160,15 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
 
     if (isOnline) {
       try {
-        // 2. Enviar para o Firebase (accepts null lat/lng)
-        await enviarEmergencia(fullNumber, description, loc.lat, loc.lng, type);
+        // 2. Enviar para o Firebase com o endereço manual
+        await enviarEmergencia(
+          fullNumber, 
+          description, 
+          loc.lat, 
+          loc.lng, 
+          type,
+          manualAddress // Novo campo único
+        );
         setSending(false);
         setStep(2); // Move to static success screen
       } catch (error) {
@@ -164,12 +179,13 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
     } else {
       // MODO OFFLINE (SMS Fallback)
       let smsBody = `SOS GOGOMA! Tipo: ${type}. Tlf: ${fullNumber}. Desc: ${description}.`;
+      smsBody += ` Endereço: ${manualAddress}.`;
       
       if (loc.lat && loc.lng) {
           const mapsLink = `https://maps.google.com/?q=${loc.lat},${loc.lng}`;
-          smsBody += ` Local: ${mapsLink}`;
+          smsBody += ` GPS: ${mapsLink}`;
       } else {
-          smsBody += ` Local: Desconhecido (GPS Falhou)`;
+          smsBody += ` GPS: Falhou`;
       }
 
       window.open(`sms:112?body=${encodeURIComponent(smsBody)}`, '_self');
@@ -182,6 +198,7 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
     setStep(0);
     setDescription(''); // Clear description for next use
     setSelectedType(null);
+    setManualAddress(''); // Clear address
     // Keep phoneNumber for convenience
   };
 
@@ -230,44 +247,56 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
     );
   }
 
-  // --- SCREEN: PHONE & DESCRIPTION INPUT (INITIAL) ---
+  // --- SCREEN: PHONE & LOCATION INPUT (INITIAL) ---
   if (step === 0) {
     return (
-        <div className="flex flex-col h-full bg-slate-900 text-white p-6 justify-center">
+        <div className="flex flex-col h-full bg-slate-900 text-white p-6 overflow-y-auto">
             {!isOnline && (
-              <div className="absolute top-0 left-0 w-full bg-yellow-900 text-yellow-200 text-center text-xs font-bold py-1 flex items-center justify-center gap-2">
+              <div className="absolute top-0 left-0 w-full bg-yellow-900 text-yellow-200 text-center text-xs font-bold py-1 flex items-center justify-center gap-2 z-20">
                  <WifiOff size={12} /> MODO OFFLINE (ENVIO VIA SMS)
               </div>
             )}
 
-            <div className="mb-6 text-center">
+            <div className="mb-6 text-center pt-6">
                 <Shield size={48} className="mx-auto text-red-600 mb-4" />
                 <h1 className="text-2xl font-bold">Pedido de Socorro</h1>
-                <p className="text-slate-400 text-sm mt-2">Identifique-se para validar o alerta.</p>
+                <p className="text-slate-400 text-sm mt-2">Preencha seus dados para validar o alerta.</p>
             </div>
 
-            <form onSubmit={handlePhoneSubmit} className="flex flex-col gap-4">
+            <form onSubmit={handlePhoneSubmit} className="flex flex-col gap-4 pb-10">
                 {/* Phone Input */}
                 <div>
                     <label className="text-xs text-slate-400 font-bold uppercase ml-1 mb-1 block">Seu Contacto (Obrigatório)</label>
                     <div className="relative">
-                        {/* Mozambique Code Prefix */}
                         <div className="absolute left-0 top-0 h-full w-16 bg-slate-700 rounded-l-xl flex items-center justify-center border border-slate-600">
                             <span className="text-gray-300 font-bold text-sm">+258</span>
                         </div>
-                        
                         <input 
                             type="tel" 
-                            placeholder="84 / 85 / 86 / 87"
+                            placeholder="84 / 85 ..."
                             className="w-full bg-slate-800 border border-slate-700 rounded-xl p-4 pl-20 text-xl font-mono tracking-widest focus:outline-none focus:border-red-500 transition-colors placeholder:text-slate-600 text-white"
                             value={phoneNumber}
                             onChange={handlePhoneChange}
-                            autoFocus
                             required
                         />
                     </div>
-                    <p className="text-[10px] text-slate-500 mt-1 text-right">{phoneNumber.length}/9 dígitos</p>
-                    <p className="text-[10px] text-slate-500 mt-0 text-left">Prefixos aceites: 82, 83, 84, 85, 86, 87</p>
+                </div>
+
+                {/* --- LOCATION SECTION (SINGLE TEXT FIELD) --- */}
+                <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 flex flex-col gap-3">
+                    <div className="flex items-center gap-2 text-blue-400 mb-1">
+                        <MapPinned size={16} />
+                        <span className="text-xs font-bold uppercase">Sua Localização (Obrigatório)</span>
+                    </div>
+
+                    <textarea
+                        placeholder="Escreva: Província, Cidade e Bairro (Ex: Maputo, Hulene B, Q.15)"
+                        className="w-full bg-slate-800 border border-slate-600 rounded-lg p-3 text-white focus:border-blue-500 outline-none text-base h-24 resize-none"
+                        value={manualAddress}
+                        onChange={(e) => setManualAddress(e.target.value)}
+                        required
+                    />
+                    <p className="text-[10px] text-slate-500">* Preencha com o máximo de detalhes possível.</p>
                 </div>
 
                 {/* Description Input */}
@@ -276,7 +305,7 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
                     <div className="relative">
                         <MessageSquareWarning className="absolute left-4 top-4 text-slate-500" size={20} />
                         <textarea 
-                            placeholder="Ex: Assalto armado, Acidente grave..."
+                            placeholder="Ex: Assalto, Acidente..."
                             className="w-full bg-slate-800 border border-slate-700 rounded-xl p-4 pl-12 text-base focus:outline-none focus:border-red-500 transition-colors placeholder:text-slate-600 text-white resize-none h-24"
                             value={description}
                             onChange={(e) => setDescription(e.target.value)}
@@ -288,7 +317,7 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
                 
                 <button 
                     type="submit"
-                    className="bg-white text-slate-900 font-bold py-4 rounded-xl flex items-center justify-center gap-2 active:scale-95 transition-transform mt-4 hover:bg-gray-100"
+                    className="bg-white text-slate-900 font-bold py-4 rounded-xl flex items-center justify-center gap-2 active:scale-95 transition-transform mt-2 hover:bg-gray-100"
                 >
                     Continuar <ArrowRight size={20} />
                 </button>
@@ -327,6 +356,11 @@ const CitizenApp: React.FC<CitizenAppProps> = ({ isOnline }) => {
           </div>
         )}
         
+        {/* Location Info Banner */}
+        <div className="bg-blue-900/20 border border-blue-800 p-2 rounded text-center text-xs text-blue-200 truncate px-4">
+           📍 {manualAddress}
+        </div>
+
         {!location && !loadingLoc && !errorMsg && (
              <div className="bg-orange-600/20 border border-orange-500 text-orange-200 p-2 rounded text-center text-xs">
                  Aviso: GPS não detetado. O alerta será enviado sem localização exata.

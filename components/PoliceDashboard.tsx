@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { EmergencyAlert, AlertStatus, EmergencyType } from '../types';
 import { getPoliceProtocol } from '../services/geminiService';
 import { atualizarStatusEmergencia, solicitarPermissaoNotificacao, onMessageListener, enviarNotificacaoPushParaTodos } from '../services/firebaseService'; // Importar serviço FCM
-import { Bell, Map, Phone, Navigation, BrainCircuit, Lock, CheckCircle, FileText, LogOut, Wifi, WifiOff, Archive, AlertCircle, Clock, ArrowDownCircle, MapPin, User, Calendar, MapPinOff, Activity, BarChart3 } from 'lucide-react';
+import { Bell, Map, Phone, Navigation, BrainCircuit, Lock, CheckCircle, FileText, LogOut, Wifi, WifiOff, Archive, AlertCircle, Clock, ArrowDownCircle, MapPin, User, Calendar, MapPinOff, Activity, BarChart3, MapPinned } from 'lucide-react';
 
 interface PoliceDashboardProps {
   alerts: EmergencyAlert[];
@@ -526,13 +526,15 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
                              <span className="text-xs">{formatFullDate(alert.timestamp)}</span>
                         </div>
 
-                        {/* Linha 4: Localização */}
+                        {/* Linha 4: Localização ou Endereço Manual */}
                         <div className="flex items-center gap-2 text-slate-400">
-                             <MapPin size={14} className={alert.location?.lat ? "text-green-500" : "text-red-500"} />
+                             <MapPin size={14} className={alert.location?.lat ? "text-green-500" : "text-slate-500"} />
                              <span className="text-xs truncate">
-                                {alert.location?.lat 
-                                  ? `${alert.location.lat.toFixed(4)}, ${alert.location.lng?.toFixed(4)}`
-                                  : 'Localização Desconhecida'}
+                                {alert.manualAddress 
+                                    ? alert.manualAddress 
+                                    : alert.location?.lat 
+                                        ? `${alert.location.lat.toFixed(4)}, ${alert.location.lng?.toFixed(4)}`
+                                        : 'Sem localização'}
                              </span>
                         </div>
 
@@ -621,6 +623,18 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
                         </div>
                     </div>
 
+                    {/* Address / Manual Location */}
+                    {selectedAlert.manualAddress && (
+                        <div className="mb-6 bg-slate-800 p-5 rounded-lg border border-slate-700">
+                             <label className="text-[10px] text-slate-400 uppercase font-bold flex items-center gap-2 mb-3 tracking-wider">
+                                <MapPinned size={14} /> Endereço Informado
+                            </label>
+                            <div className="text-xl text-white font-bold leading-relaxed">
+                                {selectedAlert.manualAddress}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Description Area */}
                     <div className="mb-6 bg-slate-800 p-5 rounded-lg border border-slate-700">
                         <label className="text-[10px] text-slate-400 uppercase font-bold flex items-center gap-2 mb-3 tracking-wider">
@@ -637,7 +651,7 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
                            {selectedAlert.location && selectedAlert.location.lat ? (
                                <span>COORDS: {selectedAlert.location.lat.toFixed(6)}, {selectedAlert.location.lng?.toFixed(6)}</span>
                            ) : (
-                               <span className="text-red-400">COORDS: INDISPONÍVEL</span>
+                               <span className="text-red-400">GPS: DADOS NÃO DISPONÍVEIS</span>
                            )}
                         </div>
                         
@@ -654,7 +668,7 @@ const PoliceDashboard: React.FC<PoliceDashboardProps> = ({ alerts, isOnline }) =
                         ) : (
                             <div className="w-full bg-slate-700 text-slate-400 font-bold py-5 rounded-xl flex items-center justify-center gap-3 cursor-not-allowed opacity-75">
                                 <MapPinOff size={24} />
-                                LOCALIZAÇÃO NÃO ENVIADA
+                                LOCALIZAÇÃO GPS NÃO ENVIADA
                             </div>
                         )}
                     </div>

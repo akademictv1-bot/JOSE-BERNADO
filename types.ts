@@ -26,6 +26,11 @@ export interface EmergencyAlert {
   description?: string; // Optional description
   contactNumber: string; // Mandatory contact number
   aiAdvice?: string; // Field for Gemini generated advice
+  // Location Fields
+  manualAddress?: string; // Single text field for address
+  province?: string; // Legacy/Optional
+  district?: string; // Legacy/Optional
+  neighborhood?: string; // Legacy/Optional
 }
 
 // Simple base64 beep for the alarm

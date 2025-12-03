@@ -39,11 +39,12 @@ export const enviarEmergencia = async (
   descricao: string, 
   latitude: number | null, 
   longitude: number | null,
-  tipo: EmergencyType
+  tipo: EmergencyType,
+  enderecoManual: string
 ) => {
   const alertasRef = ref(db, 'notificacoes');
   
-  const novoAlerta = {
+  const novoAlerta: Partial<EmergencyAlert> = {
     contactNumber: numero,
     description: descricao,
     location: {
@@ -52,7 +53,8 @@ export const enviarEmergencia = async (
     },
     type: tipo,
     status: AlertStatus.NEW,
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    manualAddress: enderecoManual
   };
 
   await push(alertasRef, novoAlerta);
