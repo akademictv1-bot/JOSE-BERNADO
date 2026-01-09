@@ -6,8 +6,6 @@ export const getPoliceProtocol = async (
   location: GeoLocation
 ): Promise<string> => {
   try {
-    // Initialize Gemini Client inside the function to avoid top-level process access issues
-    // and ensuring we use the environment variable at runtime.
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const prompt = `
@@ -17,12 +15,12 @@ export const getPoliceProtocol = async (
 
       Gere um "Protocolo de Ação Imediata" curto e direto (máximo 4 pontos) para o policial despachante.
       Foque em segurança, verificação e recursos necessários.
-      Use português de Portugal (comum em Moçambique).
+      Use português de Moçambique.
       Formato: Texto simples com bullet points. Sem preâmbulos.
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       contents: prompt,
     });
 
