@@ -7,7 +7,6 @@
     <title>GOGOMA</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      /* Custom utility for the pulsing animation of the SOS button */
       @keyframes pulse-red {
         0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7); }
         70% { box-shadow: 0 0 0 20px rgba(220, 38, 38, 0); }
@@ -16,11 +15,34 @@
       .animate-pulse-red {
         animation: pulse-red 2s infinite;
       }
-      /* Prevent scrolling on body to simulate native app feel */
-      body {
+      body, html {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
         overscroll-behavior: none;
-        background-color: #1a1a1a;
+        background-color: #0a0a0c;
         color: white;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        overflow: hidden;
+      }
+      #root {
+        height: 100%;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+      .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+      .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+      
+      .scroll-container {
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        touch-action: pan-y !important;
+        height: 100%;
+        flex: 1;
+        min-height: 0;
       }
     </style>
   <script type="importmap">
@@ -32,28 +54,16 @@
     "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
     "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
-    "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js",
     "firebase/messaging": "https://www.gstatic.com/firebasejs/10.8.0/firebase-messaging.js",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "firebase/": "https://esm.sh/firebase@^12.7.0/"
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "firebase/": "https://esm.sh/firebase@^12.8.0/",
+    "react/": "https://esm.sh/react@^19.2.4/"
   }
 }
 </script>
 </head>
   <body>
     <div id="root"></div>
-    <script>
-      // Registrar Service Worker para Notificações FCM
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/firebase-messaging-sw.js')
-          .then(function(registration) {
-            console.log('Service Worker registrado com sucesso:', registration);
-          })
-          .catch(function(err) {
-            console.log('Falha ao registrar Service Worker:', err);
-          });
-      }
-    </script>
   </body>
 </html>

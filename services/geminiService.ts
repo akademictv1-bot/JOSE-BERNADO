@@ -6,6 +6,7 @@ export const getPoliceProtocol = async (
   location: GeoLocation
 ): Promise<string> => {
   try {
+    // Inicialização correta seguindo as diretrizes
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const prompt = `
@@ -19,11 +20,13 @@ export const getPoliceProtocol = async (
       Formato: Texto simples com bullet points. Sem preâmbulos.
     `;
 
+    // Chamada direta conforme documentação atualizada
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: prompt,
     });
 
+    // Acesso direto à propriedade .text
     return response.text || "Não foi possível gerar o protocolo. Siga os procedimentos padrão.";
   } catch (error) {
     console.error("Gemini API Error:", error);

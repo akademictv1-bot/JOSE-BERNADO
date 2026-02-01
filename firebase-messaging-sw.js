@@ -12,15 +12,10 @@ const firebaseConfig = {
   appId: "1:50833835620:web:c63b6def7f1ccc23ad8171"
 };
 
-// Inicializar Firebase no SW
 firebase.initializeApp(firebaseConfig);
-
 const messaging = firebase.messaging();
 
-// Handler de mensagens em background (App Fechado)
 messaging.onBackgroundMessage((payload) => {
-  console.log('[firebase-messaging-sw.js] Notificação recebida em background ', payload);
-  
   if (payload.notification) {
     const notificationTitle = payload.notification.title;
     const notificationOptions = {
@@ -29,16 +24,14 @@ messaging.onBackgroundMessage((payload) => {
       vibrate: [200, 100, 200],
       data: payload.data
     };
-
     self.registration.showNotification(notificationTitle, notificationOptions);
   }
 });
 
 self.addEventListener('notificationclick', function(event) {
-  console.log('[Service Worker] Notification click Received.');
   event.notification.close();
-  // Abre o app ao clicar na notificação
+  // Abre o domínio atual de forma dinâmica
   event.waitUntil(
-    clients.openWindow('https://gogoma.app/') 
+    clients.openWindow(self.location.origin) 
   );
 });

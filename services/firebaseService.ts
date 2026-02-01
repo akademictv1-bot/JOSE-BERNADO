@@ -1,9 +1,21 @@
-import { initializeApp } from "firebase/app";
-import { getDatabase, ref, push, onValue, update, get, child } from "firebase/database";
-import { getMessaging, getToken, onMessage } from "firebase/messaging";
-import { AlertStatus, EmergencyType, EmergencyAlert } from "../types";
+import { initializeApp } from 'firebase/app';
+import { 
+  initializeFirestore, 
+  collection, 
+  addDoc, 
+  onSnapshot, 
+  updateDoc, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  query, 
+  where, 
+  setDoc, 
+  persistentLocalCache,
+  persistentMultipleTabManager
+} from 'firebase/firestore';
+import { EmergencyAlert, AlertStatus, UserProfile } from '../types';
 
-// Configuração fornecida
 const firebaseConfig = {
   apiKey: "AIzaSyAiCRqKono7N2KxkCGpPD9lAlHRx-AUGKY",
   authDomain: "gogoma-2.firebaseapp.com",
@@ -14,142 +26,99 @@ const firebaseConfig = {
   appId: "1:50833835620:web:c63b6def7f1ccc23ad8171"
 };
 
-// Inicializar Firebase
 const app = initializeApp(firebaseConfig);
-const db = getDatabase(app);
-let messaging: any = null;
 
-try {
-  if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-    messaging = getMessaging(app);
+/**
+ * Inicializa o Firestore com o novo sistema de cache persistente (v10.x+)
+ * Substitui o deprecated enableIndexedDbPersistence()
+ */
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  })
+});
+
+/**
+ * Converte dados do Firebase para objetos simples JS.
+ * Fundamental para evitar erros de "circular structure" com Timestamps e DocumentRefs.
+ */
+const cleanData = (data: any) => {
+  if (!data) return data;
+  const clean: any = {};
+  Object.keys(data).forEach(key => {
+    const val = data[key];
+    if (val && typeof val === 'object' && typeof val.toDate === 'function') {
+      clean[key] = val.toDate().getTime();
+    } 
+    else if (val && typeof val === 'object' && !Array.isArray(val)) {
+       clean[key] = { ...val };
+    }
+    else {
+      clean[key] = val;
+    }
+  });
+  return clean;
+};
+
+export async function buscarUsuarioPorNumero(phoneNumber: string): Promise<UserProfile | null> {
+  try {
+    const userDoc = await getDoc(doc(db, 'usuarios', phoneNumber));
+    return userDoc.exists() ? (userDoc.data() as UserProfile) : null;
+  } catch (error) {
+    console.error('Erro Firebase:', error);
+    throw error;
   }
-} catch (e) {
-  console.warn("Firebase Messaging não inicializado.");
 }
 
-const FCM_SERVER_KEY = "SUA_SERVER_KEY_AQUI"; 
+export async function verificarUsuarioExistente(phoneNumber: string, name: string): Promise<{ exists: boolean; reason?: string }> {
+  try {
+    const userDoc = await getDoc(doc(db, 'usuarios', phoneNumber));
+    if (userDoc.exists()) return { exists: true, reason: 'Número já cadastrado.' };
+    const q = query(collection(db, 'usuarios'), where('name', '==', name));
+    const querySnapshot = await getDocs(q);
+    if (!querySnapshot.empty) return { exists: true, reason: 'Nome já cadastrado.' };
+    return { exists: false };
+  } catch (error) { throw error; }
+}
 
-export const enviarEmergencia = async (
-  numero: string, 
-  descricao: string, 
-  latitude: number | null, 
-  longitude: number | null,
-  tipo: EmergencyType,
-  enderecoManual: string
-) => {
-  const alertasRef = ref(db, 'notificacoes');
-  
-  const novoAlerta: Partial<EmergencyAlert> = {
-    contactNumber: numero,
-    description: descricao || "",
-    location: {
-      lat: latitude,
-      lng: longitude
-    },
-    type: tipo,
-    status: AlertStatus.NEW,
+export async function registrarUsuario(perfil: UserProfile) {
+  await setDoc(doc(db, 'usuarios', perfil.phoneNumber), { 
+    ...perfil, 
+    dataRegisto: Date.now() 
+  });
+}
+
+export async function criarEmergencia(alerta: any) {
+  const docRef = await addDoc(collection(db, 'emergencias'), {
+    ...alerta,
     timestamp: Date.now(),
-    manualAddress: enderecoManual
-  };
+    status: AlertStatus.NEW,
+  });
+  return docRef.id;
+}
 
-  try {
-    // Gravação direta no Firebase RTDB
-    const result = await push(alertasRef, novoAlerta);
-    console.log("Sucesso: Alerta gravado ID:", result.key);
-  } catch (error: any) {
-    console.error("Erro Firebase RTDB:", error);
-    if (error.code === 'PERMISSION_DENIED' || error.message?.toLowerCase().includes('permission')) {
-      throw new Error("Acesso negado. Verifique se as Regras de Segurança no Firebase Console estão como 'true'.");
-    }
-    throw new Error("Erro de conexão. Verifique sua rede e tente novamente.");
-  }
-
-  // Notificação Push em segundo plano
-  enviarNotificacaoPushParaTodos(
-    "🚨 Novo Pedido de Socorro",
-    `Local: ${enderecoManual} - Contacto: ${numero}`
-  ).catch(() => {});
-};
-
-export const escutarEmergencias = (callback: (alertas: EmergencyAlert[]) => void) => {
-  const alertasRef = ref(db, 'notificacoes');
-  return onValue(alertasRef, (snapshot) => {
-    const data = snapshot.val();
-    if (data) {
-      const listaAlertas: EmergencyAlert[] = Object.keys(data).map(key => ({
-        id: key,
-        ...data[key]
-      }));
-      callback(listaAlertas);
-    } else {
-      callback([]);
-    }
+export function escutarEmergencias(callback: (alertas: EmergencyAlert[]) => void) {
+  return onSnapshot(collection(db, 'emergencias'), (snapshot) => {
+    const alertas: EmergencyAlert[] = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      alertas.push({ id: doc.id, ...cleanData(data) } as EmergencyAlert);
+    });
+    alertas.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    callback(alertas);
   }, (error) => {
-    console.error("Erro ao escutar dados:", error);
+    console.error("Erro no Listener Realtime:", error);
   });
-};
+}
 
-export const atualizarStatusEmergencia = async (id: string, novoStatus: AlertStatus) => {
-  const alertaRef = ref(db, `notificacoes/${id}`);
-  await update(alertaRef, { status: novoStatus });
-};
+export async function atualizarStatusEmergencia(emergenciaId: string, novoStatus: AlertStatus) {
+  const docRef = doc(db, 'emergencias', emergenciaId);
+  await updateDoc(docRef, { status: novoStatus, dataAtualizacao: Date.now() });
+}
 
-export const solicitarPermissaoNotificacao = async (badgeId: string) => {
-  if (!messaging) return;
-  try {
-    const permission = await Notification.requestPermission();
-    if (permission === 'granted') {
-      const token = await getToken(messaging, {
-        vapidKey: "BJjEAoUmes2nPKi3nc4YA9ORy29oaUCDnTLYSc6Lw5t_oY-FlYyTUBDcyFRaceJAbTBND7cFwfAGOhZAwPbGrEQ"
-      });
-      if (token) await salvarTokenPolicia(badgeId, token);
-    }
-  } catch (error) {
-    console.error("FCM Token Error:", error);
-  }
-};
+export async function adicionarConselhoIA(emergenciaId: string, conselho: string) {
+  const docRef = doc(db, 'emergencias', emergenciaId);
+  await updateDoc(docRef, { aiAdvice: conselho });
+}
 
-const salvarTokenPolicia = async (badgeId: string, token: string) => {
-  const userRef = ref(db, `policias/${badgeId}`);
-  await update(userRef, { token: token, last_login: Date.now() });
-};
-
-export const onMessageListener = () => {
-  if (!messaging) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    onMessage(messaging, (payload) => resolve(payload));
-  });
-};
-
-export const enviarNotificacaoPushParaTodos = async (titulo: string, corpo: string) => {
-  if (!FCM_SERVER_KEY || FCM_SERVER_KEY.includes("SUA_SERVER_KEY")) return;
-  try {
-    const dbRef = ref(db);
-    const snapshot = await get(child(dbRef, `policias`));
-    if (snapshot.exists()) {
-      const policias = snapshot.val();
-      const tokens: string[] = [];
-      Object.keys(policias).forEach((key) => {
-        if (policias[key].token) tokens.push(policias[key].token);
-      });
-      if (tokens.length === 0) return;
-      const promises = tokens.map(token => 
-        fetch('https://fcm.googleapis.com/fcm/send', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `key=${FCM_SERVER_KEY}`
-          },
-          body: JSON.stringify({
-            to: token,
-            notification: { title: titulo, body: corpo, icon: "/icon.png" },
-            priority: "high"
-          })
-        })
-      );
-      await Promise.all(promises);
-    }
-  } catch (error) {
-    console.warn("Notificação Push ignorada devido a erro de rede ou CORS.");
-  }
-};
+export default { buscarUsuarioPorNumero, registrarUsuario, criarEmergencia, escutarEmergencias, atualizarStatusEmergencia };

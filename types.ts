@@ -1,3 +1,4 @@
+
 export enum EmergencyType {
   POLICE_CIVIL = 'Polícia Civil',
   POLICE_TRAFFIC = 'Polícia Trânsito',
@@ -12,26 +13,32 @@ export enum AlertStatus {
 }
 
 export interface GeoLocation {
-  lat: number | null; // Allow null for fallback
-  lng: number | null; // Allow null for fallback
+  lat: number | null;
+  lng: number | null;
   accuracy?: number;
+}
+
+export interface UserProfile {
+  name: string;
+  phoneNumber: string;
+  city: string;
+  neighborhood: string;
 }
 
 export interface EmergencyAlert {
   id: string;
   type: EmergencyType;
   location: GeoLocation;
-  timestamp: number; // Unix timestamp
+  timestamp: number;
   status: AlertStatus;
-  description?: string; // Optional description
-  contactNumber: string; // Mandatory contact number
-  aiAdvice?: string; // Field for Gemini generated advice
-  // Location Fields
-  manualAddress?: string; // Single text field for address
-  province?: string; // Legacy/Optional
-  district?: string; // Legacy/Optional
-  neighborhood?: string; // Legacy/Optional
+  description?: string;
+  contactNumber: string;
+  userName?: string; // Nome do cidadão
+  aiAdvice?: string;
+  manualAddress?: string;
+  province?: string;
+  district?: string;
+  neighborhood?: string;
 }
 
-// Simple base64 beep for the alarm
-export const ALARM_SOUND_B64 = "data:audio/wav;base64,UklGRl9vT1BXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU"; // Placeholder, simplified
+export const ALARM_SOUND_B64 = "data:audio/wav;base64,UklGRl9vT1BXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU";
